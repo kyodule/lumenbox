@@ -1,0 +1,265 @@
+# Follows fakechris/lumenbox releases: each week, put this fork's commits on top of the newest
+# upstream release that is at least three days old, run upstream's checks plus ours, and report
+# the outcome as an issue. Deploying stays a person's decision (see README.md).
+#
+# Upstream code (npm install, tests, builds) runs only in check / image / dmg, which hold a
+# read-only token and keep no git credentials. plan, rebase, publish and report run only git,
+# gh and the scripts on this branch.
+name: follow-upstream
+
+on:
+  schedule:
+    - cron: "0 1 * * 1" # Monday 09:00 Asia/Shanghai
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream tag, e.g. v0.3.10 (empty: newest release at least 3 days old)"
+        required: false
+        default: ""
+      mode:
+        description: "rebase: build ours/<tag> from the previous ours branch; check: only check an ours/<tag> that is already pushed"
+        type: choice
+        options: [rebase, check]
+        default: rebase
+      ignore_age:
+        description: "Take a release younger than 3 days"
+        type: boolean
+        default: false
+
+concurrency:
+  group: follow-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM: fakechris/lumenbox
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # fast-forward main to upstream
+      actions: write # keep this schedule enabled
+    outputs:
+      skip: ${{ steps.plan.outputs.skip }}
+      reason: ${{ steps.plan.outputs.reason }}
+      tag: ${{ steps.plan.outputs.tag }}
+      tag_sha: ${{ steps.plan.outputs.tag_sha }}
+      mode: ${{ steps.plan.outputs.mode }}
+      base_branch: ${{ steps.plan.outputs.base_branch }}
+      base_tag: ${{ steps.plan.outputs.base_tag }}
+      sync: ${{ steps.plan.outputs.sync }}
+      sync_detail: ${{ steps.plan.outputs.sync_detail }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: automation
+          persist-credentials: false
+      - id: plan
+        run: node scripts/plan.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_IGNORE_AGE: ${{ inputs.ignore_age }}
+
+  rebase:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true' && needs.plan.outputs.mode == 'rebase'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      result: ${{ steps.rebase.outputs.result }}
+      head: ${{ steps.rebase.outputs.head }}
+      conflicts: ${{ steps.rebase.outputs.conflicts }}
+      stopped_at: ${{ steps.rebase.outputs.stopped_at }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: automation
+          path: automation
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.plan.outputs.base_branch }}
+          path: fork
+          fetch-depth: 0
+          persist-credentials: false
+      - id: rebase
+        working-directory: fork
+        run: ../automation/scripts/rebase.sh
+        env:
+          BASE_BRANCH: ${{ needs.plan.outputs.base_branch }}
+          BASE_TAG: ${{ needs.plan.outputs.base_tag }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          OUT: ${{ github.workspace }}/candidate
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: candidate
+          path: candidate/
+          if-no-files-found: ignore
+
+  check:
+    needs: [plan, rebase]
+    if: >-
+      always() && needs.plan.result == 'success' && needs.plan.outputs.skip != 'true' &&
+      (needs.plan.outputs.mode == 'check' || needs.rebase.outputs.result == 'ok')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: automation
+          path: automation
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.plan.outputs.mode == 'rebase'
+        with:
+          name: candidate
+          path: candidate
+      - name: candidate source
+        run: automation/scripts/fetch-candidate.sh src
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          REPO: ${{ github.repository }}
+          EXPECT_HEAD: ${{ needs.rebase.outputs.head }}
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+      # The steps below are upstream's .github/workflows/ci.yml at v0.3.9, run on the candidate.
+      - run: npm ci
+        working-directory: src
+      - name: typecheck
+        run: npm run typecheck
+        working-directory: src
+      - name: lint
+        run: npm run lint
+        working-directory: src
+      - name: architecture ratchet
+        run: npm run arch
+        working-directory: src
+      - name: let the test runner open a network namespace
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: the host sandbox's Linux mechanism
+        run: sudo apt-get install -y --no-install-recommends bubblewrap socat
+      - name: test
+        run: npm run test:ci
+        working-directory: src
+      - name: build
+        run: npm run build
+        working-directory: src
+      - name: release check
+        run: node scripts/release-check.mjs
+        working-directory: src
+        env:
+          RELEASE_CHECK_SKIP_IMAGE: "1"
+      - name: the shell's main.cjs parses
+        run: node --check electron/main.cjs
+        working-directory: src
+
+  image:
+    needs: [plan, rebase]
+    if: >-
+      always() && needs.plan.result == 'success' && needs.plan.outputs.skip != 'true' &&
+      (needs.plan.outputs.mode == 'check' || needs.rebase.outputs.result == 'ok')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: automation
+          path: automation
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.plan.outputs.mode == 'rebase'
+        with:
+          name: candidate
+          path: candidate
+      - name: candidate source
+        run: automation/scripts/fetch-candidate.sh src
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          REPO: ${{ github.repository }}
+          EXPECT_HEAD: ${{ needs.rebase.outputs.head }}
+      - name: build the amd64 image (not pushed anywhere)
+        run: automation/scripts/build-image.sh src "lumenbox-ours:${{ needs.plan.outputs.tag }}"
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+
+  dmg:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: automation
+          persist-credentials: false
+      - name: the official DMG ships the files this fork replaces as upstream source
+        run: scripts/check-dmg.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+
+  publish:
+    needs: [plan, rebase, check, image, dmg]
+    if: needs.plan.outputs.mode == 'rebase' && needs.rebase.outputs.result == 'ok'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: candidate
+          path: candidate
+      - name: push ours/${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags "https://github.com/$UPSTREAM.git" "refs/tags/$TAG:refs/tags/$TAG"
+          git fetch candidate/candidate.bundle "refs/heads/candidate:refs/heads/candidate"
+          test "$(git rev-parse candidate)" = "$HEAD_SHA"
+          git push origin "candidate:refs/heads/ours/$TAG"
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          HEAD_SHA: ${{ needs.rebase.outputs.head }}
+
+  report:
+    needs: [plan, rebase, check, image, dmg, publish]
+    if: always() && (needs.plan.result != 'success' || needs.plan.outputs.skip != 'true' || needs.plan.outputs.sync == 'failed')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: automation
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.plan.outputs.mode == 'rebase'
+        continue-on-error: true
+        with:
+          name: candidate
+          path: candidate
+      - run: node scripts/report.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NEEDS: ${{ toJSON(needs) }}
+          CANDIDATE_DIR: candidate
