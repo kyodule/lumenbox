@@ -703,6 +703,274 @@ function startUse(use) {
   loadShellPage();
 }
 
+// LUMENBOX-HOSTEXEC-PATCH v1 (fork kyodule/lumenbox): run the server's RunOnHost commands on this
+// Mac. ~/.agentbox/host-exec.json is this Mac's own word: mode off | ask | always,
+// the directory commands run under, and whether they may use the network. The server only carries.
+const HOST_EXEC_FILE = path.join(process.env.AGENTBOX_HOME || path.join(os.homedir(), ".agentbox"), "host-exec.json");
+const HOST_EXEC_RUNNER = path.join(__dirname, "host-exec-runner.ts");
+const HOST_EXEC_APPROVAL_MS = 120_000;
+const hostExecQueue = [];
+const hostExecSeen = new Set();
+let hostExecRequest = null;
+let hostExecGeneration = 0;
+let hostExecBusy = false;
+let hostExecError = null;
+// One line per command this Mac was asked to run, with what was decided: the Mac's own record.
+const HOST_EXEC_LOG = path.join(os.homedir(), "Library", "Logs", "LumenBox", "host-exec.log");
+
+function hostExecAudit(fields) {
+  try {
+    fs.mkdirSync(path.dirname(HOST_EXEC_LOG), { recursive: true });
+    fs.appendFileSync(HOST_EXEC_LOG, `${JSON.stringify({ at: new Date().toISOString(), ...fields })}\n`, { mode: 0o600 });
+  } catch (err) {
+    log(`host exec: could not write ${HOST_EXEC_LOG}: ${err.message}`);
+  }
+}
+
+function readHostExec() {
+  hostExecError = null;
+  if (!fs.existsSync(HOST_EXEC_FILE)) return { mode: "off", cwd: null, network: false };
+  try {
+    const raw = JSON.parse(fs.readFileSync(HOST_EXEC_FILE, "utf8"));
+    const mode = raw.mode === "ask" || raw.mode === "always" ? raw.mode : "off";
+    const cwd = typeof raw.cwd === "string" && raw.cwd.trim() !== "" ? raw.cwd.trim() : null;
+    if (mode !== "off" && cwd === null) throw new Error("cwd is required unless mode is off");
+    return { mode, cwd, network: raw.network === true };
+  } catch (err) {
+    // A broken file is off, and the tray says so: it must never become a door left open.
+    hostExecError = `${HOST_EXEC_FILE}: ${err.message}`;
+    return { mode: "off", cwd: null, network: false };
+  }
+}
+
+function setHostExecMode(mode) {
+  let raw = {};
+  try {
+    raw = JSON.parse(fs.readFileSync(HOST_EXEC_FILE, "utf8"));
+  } catch {}
+  raw.mode = mode;
+  fs.mkdirSync(path.dirname(HOST_EXEC_FILE), { recursive: true });
+  fs.writeFileSync(HOST_EXEC_FILE, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+  log(`host exec: mode set to ${mode}`);
+  watchHostExec();
+}
+
+function hostExecTrayItems() {
+  const config = readHostExec();
+  const choose = mode => () => setHostExecMode(mode);
+  const where = hostExecError
+    ? `Config error, see ${HOST_EXEC_FILE}`
+    : `Directory: ${config.cwd ?? "not set"} · network ${config.network ? "on" : "off"}`;
+  return [
+    { type: "separator" },
+    { label: "Mac execution", enabled: false },
+    { label: "Off", type: "radio", checked: config.mode === "off", click: choose("off") },
+    { label: "Ask every time", type: "radio", checked: config.mode === "ask", click: choose("ask") },
+    { label: "Always allow", type: "radio", checked: config.mode === "always", click: choose("always") },
+    { label: where, enabled: false },
+  ];
+}
+
+/** Holds the command stream open while the mode is not off. Off means not connected: the server then offers no RunOnHost. */
+function watchHostExec() {
+  hostExecRequest?.destroy();
+  hostExecRequest = null;
+  const generation = ++hostExecGeneration;
+  // Queued commands belong to the stream they came on, and the server gave them up when it closed.
+  hostExecQueue.length = 0;
+  const config = readHostExec();
+  updateTrayMenu();
+  if (hostExecError) log(`host exec: ${hostExecError}`);
+  if (!REMOTE || config.mode === "off") return;
+  let retried = false;
+  const retry = delay => {
+    if (retried || generation !== hostExecGeneration) return;
+    retried = true;
+    setTimeout(() => {
+      if (generation === hostExecGeneration) watchHostExec();
+    }, delay);
+  };
+  const request = pageClient.get(`${PAGE}api/host-exec/stream`, { headers: uiAuth.headers }, response => {
+    if (response.statusCode !== 200) {
+      log(`host exec: the server answered ${response.statusCode}; trying again in 30 s`);
+      response.resume();
+      retry(30_000);
+      return;
+    }
+    log("host exec: connected; this Mac takes commands");
+    let buffer = "";
+    response.on("data", chunk => {
+      buffer += String(chunk);
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          let job;
+          try {
+            job = JSON.parse(line.slice(5));
+          } catch {
+            continue;
+          }
+          if (job?.type !== "run" || typeof job.id !== "string" || typeof job.command !== "string" || hostExecSeen.has(job.id)) continue;
+          hostExecSeen.add(job.id);
+          hostExecQueue.push({ ...job, generation });
+          void pumpHostExec();
+        }
+      }
+    });
+    const lost = () => retry(3_000);
+    response.on("end", lost);
+    response.on("close", lost);
+    response.on("error", lost);
+  });
+  request.on("error", () => retry(3_000));
+  hostExecRequest = request;
+}
+
+/** One command at a time: two approval sheets on one window cannot both be read. */
+async function pumpHostExec() {
+  if (hostExecBusy) return;
+  hostExecBusy = true;
+  try {
+    while (hostExecQueue.length > 0) {
+      const job = hostExecQueue.shift();
+      if (job.generation !== hostExecGeneration) continue;
+      let answer;
+      try {
+        answer = await handleHostExecJob(job);
+      } catch (err) {
+        answer = { refused: `the Mac failed: ${err.message}` };
+      }
+      postHostExecResult({ id: job.id, ...answer });
+    }
+  } finally {
+    hostExecBusy = false;
+  }
+}
+
+async function handleHostExecJob(job) {
+  const config = readHostExec();
+  const audit = fields => hostExecAudit({ id: job.id, agent: job.agent ?? null, command: job.command.slice(0, 2000), mode: config.mode, ...fields });
+  if (config.mode === "off") {
+    audit({ decision: "off" });
+    return { refused: "Mac execution is off on this Mac" };
+  }
+  let decision = "always";
+  let answeredMs = null;
+  if (config.mode === "ask") {
+    ({ decision, ms: answeredMs } = await askHostExec(job, config));
+    if (decision !== "approved") {
+      audit({ decision, answeredMs });
+      return { refused: decision === "timeout" ? "no answer on the Mac within 2 minutes" : "the person declined on the Mac" };
+    }
+    if (job.generation !== hostExecGeneration) {
+      audit({ decision: "stale" });
+      return { refused: "the connection to the server changed while the Mac was asking" };
+    }
+  }
+  log(`host exec: running for ${job.agent ?? "an agent"}: ${job.command.slice(0, 200)}`);
+  const answer = await runHostExecChild({ command: job.command, cwd: config.cwd, network: config.network, timeoutMs: job.timeoutMs });
+  audit({ decision, answeredMs, code: answer.result?.code ?? null, refused: answer.refused ?? null });
+  return answer;
+}
+
+/**
+ * A sheet on the window: on macOS a message box with no parent runs synchronously and ignores the timeout.
+ * The app is not brought forward, so typing meant for another app cannot answer it, and the keyboard
+ * default (Return, Escape) is Decline: running takes a click on the other button.
+ */
+async function askHostExec(job, config) {
+  createWindow();
+  if (!mainWindow) return { decision: "declined", ms: 0 };
+  if (!mainWindow.isVisible()) mainWindow.showInactive();
+  const bounce = process.platform === "darwin" ? app.dock?.bounce("critical") : undefined;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HOST_EXEC_APPROVAL_MS);
+  const shownAt = Date.now();
+  try {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: ["Decline", "Run on this Mac"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: "Run a command on this Mac?",
+      message: `${job.agent ?? "An agent"} wants to run a command on this Mac`,
+      detail: `${job.command}\n\nDirectory: ${config.cwd}\nNetwork: ${config.network ? "allowed" : "off"}\nDeclined automatically after 2 minutes.`,
+      signal: controller.signal,
+    });
+    const ms = Date.now() - shownAt;
+    if (controller.signal.aborted) return { decision: "timeout", ms };
+    return { decision: response === 1 ? "approved" : "declined", ms };
+  } finally {
+    clearTimeout(timer);
+    if (bounce !== undefined) app.dock?.cancelBounce(bounce);
+  }
+}
+
+function runHostExecChild(job) {
+  return new Promise(resolve => {
+    const env = withToolPath({ ...process.env, ELECTRON_RUN_AS_NODE: "1" });
+    delete env.AGENTBOX_UI_TOKEN;
+    const child = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", HOST_EXEC_RUNNER], {
+      cwd: REPO,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", chunk => {
+      out += String(chunk);
+    });
+    child.stderr.on("data", chunk => {
+      err += String(chunk);
+    });
+    const killer = setTimeout(() => child.kill("SIGKILL"), (job.timeoutMs || 300_000) + 30_000);
+    child.on("error", error => {
+      clearTimeout(killer);
+      resolve({ refused: `could not start the Mac runner: ${error.message}` });
+    });
+    child.on("close", () => {
+      clearTimeout(killer);
+      try {
+        resolve(JSON.parse(out));
+      } catch {
+        resolve({ refused: `the Mac runner gave no answer${err.trim() ? `: ${err.trim().slice(0, 500)}` : ""}` });
+      }
+    });
+    child.stdin.end(JSON.stringify(job));
+  });
+}
+
+/** An edit to host-exec.json by hand takes effect like a tray change: reconnect only when the effective config changed. */
+function watchHostExecFile() {
+  let last = JSON.stringify(readHostExec());
+  fs.watchFile(HOST_EXEC_FILE, { interval: 2000 }, () => {
+    const now = JSON.stringify(readHostExec());
+    if (now === last) return;
+    last = now;
+    log("host exec: host-exec.json changed");
+    watchHostExec();
+  });
+}
+
+function postHostExecResult(body) {
+  const payload = JSON.stringify(body);
+  const request = pageClient.request(
+    `${PAGE}api/host-exec/result`,
+    { method: "POST", headers: { ...uiAuth.headers, "content-type": "application/json", "content-length": Buffer.byteLength(payload) } },
+    response => {
+      response.resume();
+      if (response.statusCode !== 200) log(`host exec: the server answered ${response.statusCode} to the result for ${body.id}`);
+    }
+  );
+  request.on("error", error => log(`host exec: could not send the result for ${body.id}: ${error.message}`));
+  request.end(payload);
+}
+
 function buildTrayMenu() {
   const loginSettings = app.getLoginItemSettings();
   return Menu.buildFromTemplate([
@@ -716,7 +984,7 @@ function buildTrayMenu() {
     },
     { label: `Supervision: ${supervisionChild ? "running" : "not running"}`, enabled: false },
     ...(REMOTE
-      ? [{ label: `Connected to ${new URL(PAGE).host}`, enabled: false }]
+      ? [{ label: `Connected to ${new URL(PAGE).host}`, enabled: false }, ...hostExecTrayItems()]
       : [{
           label: "Restart server",
           click: () => {
@@ -823,6 +1091,7 @@ function startPersonal() {
       // The server never slept; only this side's sockets may be stale.
       log("system resumed; reconnecting the remote event stream");
       watchEvents();
+      watchHostExec();
       return;
     }
     log("system resumed; asking the server to sweep the chat channels");
@@ -835,4 +1104,5 @@ function startPersonal() {
     }, 8_000);
   });
   whenServerReady(() => { watchEvents(); startSupervision(); });
+  if (REMOTE) whenServerReady(() => { watchHostExec(); watchHostExecFile(); });
 }
