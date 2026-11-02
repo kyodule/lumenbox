@@ -252,7 +252,8 @@ RUN mkdir -p /home/box/Desktop /home/box/.config/pcmanfm/default \
 # the engine reads — the projection face of the preset contract.
 ARG OPENCODE_VERSION=""
 RUN if [ -n "$OPENCODE_VERSION" ]; then \
-      npm install -g "opencode-ai@${OPENCODE_VERSION}" \
+      { [ "$(dpkg --print-architecture)" != amd64 ] || npm install -g "opencode-linux-x64@${OPENCODE_VERSION}"; } \
+      && npm install -g "opencode-ai@${OPENCODE_VERSION}" \
       && mkdir -p /home/box/.config/opencode \
       && ln -sfn /home/box/work/skills /home/box/.config/opencode/skill \
       # npm's postinstall probes the package as root and leaves root-owned litter under
