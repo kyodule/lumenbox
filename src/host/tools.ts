@@ -62,7 +62,7 @@ import { executeForget, ForgetPlans, forgetOutcomeReport, forgetPlanReport, forg
 import type { GoalGate } from "./goal-gate.ts";
 import { checklistAdditions, describePursuit } from "./goal-mode.ts";
 import { AROUND_ENTRY_CHARS, describeHistory, ENTRY_CHARS, readEpochHistory, readHistory } from "./history.ts";
-import type { HostRunner } from "./host-runner.ts";
+import { DESKTOP_RUN_ON_HOST, DESKTOP_SECRETS_REFUSAL, type HostRunner } from "./host-runner.ts"; // LUMENBOX-FORK
 import { sniffImage } from "./image-refusal.ts";
 import { appendLearning, hostOf, learningsDir, readLearnings, renderLearnings } from "./learnings.ts";
 import type { McpManager, ToolEffect } from "./mcp.ts";
@@ -1861,7 +1861,7 @@ export function buildTools(
   if (hasHostRunner) {
     tools.push({
       name: "RunOnHost",
-      description:
+      description: process.env.AGENTBOX_HOST_EXEC === "desktop" ? DESKTOP_RUN_ON_HOST :
         "Run a command on the person's own computer — the machine LumenBox runs on, " +
         "outside your box. This is how you reach things the box cannot: a device on a " +
         "USB port, AppleScript that drives desktop apps, or a command-line tool " +
@@ -3545,7 +3545,7 @@ export async function dispatchTool(
       }
       const command = String(input.command ?? "").trim();
       if (command === "") return { text: "`command` is required.", isError: true };
-
+      if (context.hostRunner.refusesSecrets && Array.isArray(input.secrets) && input.secrets.length > 0) return { text: DESKTOP_SECRETS_REFUSAL, isError: true };
       // Named secrets, resolved through the vault against this agent's grants, audited there;
       // a refused one is left out and named back, so the model learns it lacks the grant.
       const secretEnv: Record<string, string> = {};
@@ -3568,7 +3568,7 @@ export async function dispatchTool(
       if (Object.keys(secretEnv).length > 0) context.policy?.taint.mark(context.turnId ?? "", "vault");
 
       try {
-        const result = await context.hostRunner.run(command, secretEnv, callFor(context).call);
+        const result = await context.hostRunner.run(command, secretEnv, callFor(context).call, context.agent.profile.name);
         const parts = [
           result.stdout.trim() !== "" ? result.stdout : "(no stdout)",
           result.stderr.trim() !== "" ? `stderr:\n${result.stderr}` : "",
