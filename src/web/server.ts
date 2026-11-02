@@ -137,7 +137,7 @@ import {
 import { TelegramChannel } from "../channels/telegram.ts";
 import { parseTailmsgRecordConfig, tailmsgDoorFromRecord } from "../channels/tailmsg.ts";
 import { startHostEgress } from "../host/host-egress.ts";
-import { HostRunner, hostRunnerConfig } from "../host/host-runner.ts";
+import { DesktopHostRunner, HostRunner, hostRunnerConfig } from "../host/host-runner.ts";
 import { HostSandbox } from "../host/host-sandbox.ts";
 import { outboundRedactor } from "../host/redact-outbound.ts";
 import { ALL_TOOLS } from "../host/orchestrator.ts";
@@ -508,8 +508,12 @@ export async function startWebServer(options: WebOptions): Promise<() => void> {
     egress: relayEnv === undefined ? Promise.resolve(undefined) : startHostEgress({ ...relayEnv, log }).catch((error: unknown) => { log(`host egress: not started (${error instanceof Error ? error.message : String(error)}); host processes have no network`); return undefined; }),
   };
   // The door out of the box, from config: off unless an operator turned it on; read once, like the provider.
-  const hostRunner = new HostRunner(hostRunnerConfig(loadConfig().hostExec ?? {}), hostProcess);
-  if (hostRunner.enabled) log("host execution is on; every host command still asks for approval");
+  // LUMENBOX-HOSTEXEC-PATCH v2: AGENTBOX_HOST_EXEC=desktop sends RunOnHost to the person's Mac through
+  // the LumenBox app's connection instead of this machine; Settings' hostExec is not used then.
+  const desktopHostRunner = process.env.AGENTBOX_HOST_EXEC === "desktop" ? new DesktopHostRunner({ log }) : undefined;
+  const hostRunner = desktopHostRunner ?? new HostRunner(hostRunnerConfig(loadConfig().hostExec ?? {}), hostProcess);
+  if (desktopHostRunner !== undefined) log("host execution goes to the person's Mac (AGENTBOX_HOST_EXEC=desktop); offered while the app is connected");
+  else if (hostRunner.enabled) log("host execution is on; every host command still asks for approval");
 
 
   // The credential vault. Read fresh on each edit through the routes; the orchestrator
@@ -6823,6 +6827,36 @@ export async function startWebServer(options: WebOptions): Promise<() => void> {
               log(`turn failed: ${message}`);
               broadcast({ type: "error", agentId, message });
             });
+          return;
+        }
+
+        // LUMENBOX-HOSTEXEC-PATCH v2: the person's Mac takes RunOnHost commands on this stream and
+        // answers on /api/host-exec/result. Admin only: it is a door into that Mac.
+        if (route === "GET /api/host-exec/stream" || route === "POST /api/host-exec/result") {
+          if (desktopHostRunner === undefined) {
+            send(res, 404, { error: "Mac execution is not enabled on this server (AGENTBOX_HOST_EXEC=desktop)." });
+            return;
+          }
+          if (refusedRole("admin")) return;
+          if (route === "POST /api/host-exec/result") {
+            const settled = desktopHostRunner.settle(await readJson(req));
+            send(res, settled ? 200 : 404, settled ? { ok: true } : { error: "No command with that id is waiting." });
+            return;
+          }
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
+          res.write(": connected\n\n");
+          const seat = desktopHostRunner.attach(frame => res.write(frame));
+          const keepAlive = setInterval(() => {
+            try {
+              res.write(": ping\n\n");
+            } catch {
+              clearInterval(keepAlive);
+            }
+          }, 20_000);
+          req.on("close", () => {
+            clearInterval(keepAlive);
+            desktopHostRunner.detach(seat);
+          });
           return;
         }
 

@@ -32,6 +32,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { callEnvironment } from "../egress/call.ts";
 import type { HostEgress } from "./host-egress.ts";
@@ -104,6 +105,11 @@ export class HostRunner {
     return this.config.enabled;
   }
 
+  /** True when this runner cannot take vault secrets (the Mac runner, LUMENBOX-HOSTEXEC-PATCH). */
+  get refusesSecrets(): boolean {
+    return false;
+  }
+
   /**
    * Why a run cannot happen, if it cannot — so the tool can refuse with a reason a
    * person can act on rather than a bare failure.
@@ -137,7 +143,7 @@ export class HostRunner {
    * `call` is the INV-784 token for the tool call this is: the egress proxy credential, so
    * the relay's record names the call and its refusals come back on the result (INV-1345).
    */
-  async run(command: string, secretEnv: Record<string, string> = {}, call?: string): Promise<HostRunResult> {
+  async run(command: string, secretEnv: Record<string, string> = {}, call?: string, _agent?: string): Promise<HostRunResult> {
     const reason = this.unavailableReason();
     if (reason !== undefined) throw new Error(reason);
     const cwd = this.config.cwd!;
@@ -191,6 +197,152 @@ export class HostRunner {
         }
       );
     });
+  }
+}
+
+// LUMENBOX-HOSTEXEC-PATCH v2: RunOnHost on the person's Mac, through the LumenBox app there
+// (ops/lumenbox/patch_hostd_host_exec.py in personal-bot). The app holds a stream open; each
+// approved command goes out on it and comes back on POST /api/host-exec/result. The Mac decides
+// whether to run it: its own switch, directory, network and sandbox; this side only carries.
+
+interface PendingDesktopRun {
+  resolve: (result: HostRunResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  seat: number;
+}
+
+/** What the Mac may hold a command for: its approval dialog, then the command itself. */
+export const DESKTOP_APPROVAL_MS = 120_000;
+const DESKTOP_SLACK_MS = 30_000;
+const DESKTOP_MAX_TEXT = 5_000_000;
+
+/** RunOnHost's description in desktop mode: the default one says commands run where LumenBox runs, the server here. */
+export const DESKTOP_RUN_ON_HOST =
+  "Run a command on the person's Mac, through the LumenBox app on it. You run on a server; " +
+  "this tool is the only way to reach that Mac, and it exists only while the app is open there " +
+  "with Mac execution switched on. If a call says the Mac is not connected, tell the person; do " +
+  "not retry in a loop. Commands run through the person's login shell under a working directory " +
+  "they chose on the Mac. Writes are allowed only there and in the temp directory, never into " +
+  "~/.ssh, shell startup files or .git/hooks; network follows the person's setting. Every call " +
+  "stops for the person to approve the exact command, here and possibly again on the Mac, so write " +
+  "the command you mean and say in your message why you need it. Returns stdout, stderr and the " +
+  "exit code, the same as `bash`. `secrets` is not supported here: credentials stay on the server.";
+
+/** The answer when RunOnHost names vault secrets in desktop mode, given before any is resolved. */
+export const DESKTOP_SECRETS_REFUSAL =
+  "Secrets are not sent to the person's Mac. Run the command without `secrets`; git on the Mac uses the Mac's own ssh keys or keychain.";
+
+export class DesktopHostRunner extends HostRunner {
+  private seat: { id: number; write: (frame: string) => void } | undefined;
+  private seats = 0;
+  private readonly pending = new Map<string, PendingDesktopRun>();
+  private readonly note: (line: string) => void;
+  private readonly approvalMs: number;
+  private readonly commandMs: number;
+
+  constructor(options: { log?: (line: string) => void; approvalMs?: number; commandMs?: number } = {}) {
+    super(hostRunnerConfig({ enabled: true }));
+    this.note = options.log ?? (() => {});
+    this.approvalMs = options.approvalMs ?? DESKTOP_APPROVAL_MS;
+    this.commandMs = options.commandMs ?? hostRunnerConfig({}).timeoutMs;
+  }
+
+  /** Offered to an agent only while the Mac is connected; a closed app means no tool, not a refusal. */
+  override get enabled(): boolean {
+    return this.seat !== undefined;
+  }
+
+  /** Vault values stay on the server; a command that needs one is refused before it is resolved. */
+  override get refusesSecrets(): boolean {
+    return true;
+  }
+
+  override unavailableReason(): string | undefined {
+    return this.seat === undefined
+      ? "The person's Mac is not connected: the LumenBox app there is closed, or Mac execution is off in its tray menu."
+      : undefined;
+  }
+
+  /** The Mac's stream opened. One Mac at a time: a newer connection replaces the older one. */
+  attach(write: (frame: string) => void): number {
+    if (this.seat !== undefined) this.dropSeat("A newer connection from the Mac replaced this one");
+    const id = ++this.seats;
+    this.seat = { id, write };
+    this.note(`host exec: the Mac connected (seat ${id})`);
+    return id;
+  }
+
+  /** The Mac's stream closed. A stale close from a replaced stream changes nothing. */
+  detach(id: number): void {
+    if (this.seat?.id !== id) return;
+    this.dropSeat("The Mac disconnected");
+    this.note(`host exec: the Mac disconnected (seat ${id})`);
+  }
+
+  private dropSeat(why: string): void {
+    const old = this.seat?.id;
+    this.seat = undefined;
+    for (const [id, waiting] of this.pending) {
+      if (waiting.seat !== old) continue;
+      this.pending.delete(id);
+      clearTimeout(waiting.timer);
+      // Never replayed: the command may already have run once on the Mac.
+      waiting.reject(new Error(`${why} while the command was out. Its result is unknown: it may or may not have run on the Mac. Check before running it again.`));
+    }
+  }
+
+  override async run(command: string, secretEnv: Record<string, string> = {}, _call?: string, agent?: string): Promise<HostRunResult> {
+    if (Object.keys(secretEnv).length > 0) throw new Error("Secrets are not sent to the person's Mac.");
+    const seat = this.seat;
+    if (seat === undefined) throw new Error(this.unavailableReason());
+    const id = randomUUID();
+    const timeoutMs = this.commandMs;
+    return new Promise<HostRunResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`No answer from the Mac within ${Math.round((this.approvalMs + timeoutMs + DESKTOP_SLACK_MS) / 1000)} seconds. Its result is unknown.`));
+      }, this.approvalMs + timeoutMs + DESKTOP_SLACK_MS);
+      this.pending.set(id, { resolve, reject, timer, seat: seat.id });
+      try {
+        seat.write(`data: ${JSON.stringify({ type: "run", id, agent: agent ?? null, command, timeoutMs })}\n\n`);
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(new Error(`Could not send the command to the Mac: ${error instanceof Error ? error.message : String(error)}. It did not run.`));
+      }
+    });
+  }
+
+  /** The Mac's answer for one command. False when no command with that id is waiting. */
+  settle(body: unknown): boolean {
+    const answer = (body ?? {}) as { id?: unknown; result?: unknown; refused?: unknown };
+    if (typeof answer.id !== "string") return false;
+    const waiting = this.pending.get(answer.id);
+    if (waiting === undefined) return false;
+    this.pending.delete(answer.id);
+    clearTimeout(waiting.timer);
+    if (typeof answer.refused === "string") {
+      waiting.reject(new Error(`Not run on the Mac: ${answer.refused}`));
+      return true;
+    }
+    const raw = answer.result as Partial<HostRunResult> | undefined;
+    if (raw === undefined || raw === null || typeof raw !== "object") {
+      waiting.reject(new Error("The Mac sent an answer this server cannot read; the result is unknown."));
+      return true;
+    }
+    const text = (value: unknown) => (typeof value === "string" ? value.slice(0, DESKTOP_MAX_TEXT) : "");
+    waiting.resolve({
+      stdout: text(raw.stdout),
+      stderr: text(raw.stderr),
+      code: typeof raw.code === "number" ? raw.code : null,
+      timedOut: raw.timedOut === true,
+      truncatedBytes: typeof raw.truncatedBytes === "number" ? raw.truncatedBytes : 0,
+      ...(raw.sandbox !== undefined && typeof raw.sandbox === "object" && raw.sandbox !== null
+        ? { sandbox: { mechanism: "sandbox-exec" as const, ...(typeof raw.sandbox.note === "string" ? { note: raw.sandbox.note } : {}) } }
+        : {}),
+    });
+    return true;
   }
 }
 
