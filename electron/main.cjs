@@ -31,15 +31,41 @@ const {
 const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
+const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { desktopAuth } = require("./ui-auth.cjs");
 const { badgeCount, notificationsDue } = require("./attention-signals.cjs");
 const { syncLoginItem } = require("./login-item.cjs");
-const uiAuth = desktopAuth();
+// LUMENBOX-REMOTE-PATCH v2: connect-to-server mode (upstream docs/36 stage 7, not shipped
+// as of 0.3.8). ~/.agentbox/remote.json = {"url":"https://…","token":"…"} makes this shell a
+// seat for a server elsewhere; delete the file to get the local server back.
+const REMOTE_FILE = path.join(process.env.AGENTBOX_HOME || path.join(os.homedir(), ".agentbox"), "remote.json");
+let REMOTE_ERROR = null;
+const REMOTE = loadRemoteTarget();
+const uiAuth = REMOTE ? desktopAuth({ AGENTBOX_UI_TOKEN: REMOTE.token }) : desktopAuth();
+
+function loadRemoteTarget() {
+  if (!fs.existsSync(REMOTE_FILE)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(REMOTE_FILE, "utf8"));
+    const url = typeof parsed.url === "string" ? parsed.url.trim() : "";
+    const token = typeof parsed.token === "string" ? parsed.token.trim() : "";
+    // Plain http would hand the UI token to anyone on the path; the server refuses it too.
+    if (!/^https:\/\/[^/\s]+/.test(url)) throw new Error("url must start with https://");
+    if (token === "") throw new Error("token is empty");
+    return { url: `${url.replace(/\/+$/, "")}/`, token };
+  } catch (err) {
+    // Loud rather than a silent fallback: starting the local server instead would look like
+    // the remote installation lost every agent.
+    REMOTE_ERROR = `${REMOTE_FILE}: ${err.message}. Fix it, or delete it to run the local server.`;
+    return null;
+  }
+}
 
 const PORT = Number(process.env.LUMENBOX_PORT || 7777);
-const PAGE = `http://127.0.0.1:${PORT}/`;
+const PAGE = REMOTE ? REMOTE.url : `http://127.0.0.1:${PORT}/`;
+const pageClient = PAGE.startsWith("https:") ? https : http;
 /** Mirrors RESTART_EXIT_CODE in src/web/server.ts. */
 const RESTART_EXIT_CODE = 75;
 const REPO = path.join(__dirname, "..");
@@ -276,6 +302,7 @@ function restartSupervision() {
  * because a notification channel that carries everything carries nothing.
  */
 let eventsRequest = null;
+let eventsGeneration = 0;
 /** Agents with a turn in flight, from the server's event stream: the memory guard
  *  waits out a live turn before reloading the page under it. */
 const busyAgents = new Set();
@@ -316,7 +343,18 @@ function readAgentFacts() {
 
 function watchEvents() {
   eventsRequest?.destroy();
-  const request = http.get(`${PAGE}api/events`, { headers: uiAuth.headers }, response => {
+  // One retry per stream, from whichever of end/close/error comes first. Upstream retried
+  // on end only, so a server that went away mid-stream (a restart, a dropped connection)
+  // left the shell without notifications until it was relaunched. The generation check
+  // keeps a stream replaced on purpose (resume) from scheduling a second one.
+  const generation = ++eventsGeneration;
+  let retried = false;
+  const retry = () => {
+    if (retried || generation !== eventsGeneration) return;
+    retried = true;
+    setTimeout(watchEvents, 3000);
+  };
+  const request = pageClient.get(`${PAGE}api/events`, { headers: uiAuth.headers }, response => {
     let buffer = "";
     response.on("data", chunk => {
       buffer += String(chunk);
@@ -335,9 +373,11 @@ function watchEvents() {
         }
       }
     });
-    response.on("end", () => setTimeout(watchEvents, 3000));
+    response.on("end", retry);
+    response.on("close", retry);
+    response.on("error", retry);
   });
-  request.on("error", () => setTimeout(watchEvents, 3000));
+  request.on("error", retry);
   eventsRequest = request;
 }
 
@@ -427,7 +467,9 @@ function startMemoryGuard() {
 }
 
 /** Polls the page until the server answers, then calls back. */
-function whenServerReady(callback, deadline = Date.now() + 60_000) {  const request = http.get(PAGE, { headers: uiAuth.headers }, response => {
+// A remote server can be away for longer than a local child takes to start (a network
+// change, the VM restarting), so remote mode keeps waiting, more slowly.
+function whenServerReady(callback, deadline = Date.now() + (REMOTE ? Infinity : 60_000)) {  const request = pageClient.get(PAGE, { headers: uiAuth.headers }, response => {
     response.resume();
     if (response.statusCode && response.statusCode < 500) {
       callback();
@@ -441,7 +483,7 @@ function whenServerReady(callback, deadline = Date.now() + 60_000) {  const requ
       log("server did not come up within a minute");
       return;
     }
-    setTimeout(() => whenServerReady(callback, deadline), 500);
+    setTimeout(() => whenServerReady(callback, deadline), REMOTE ? 3000 : 500);
   }
 }
 
@@ -481,14 +523,16 @@ function buildTrayMenu() {
       enabled: false,
     },
     { label: `Supervision: ${supervisionChild ? "running" : "not running"}`, enabled: false },
-    {
-      label: "Restart server",
-      click: () => {
-        // Kill and let the exit handler bring it back; the reload rides on ready.
-        crashRestarts = -1; // the deliberate kill is not a crash
-        serverChild?.kill();
-      },
-    },
+    ...(REMOTE
+      ? [{ label: `Connected to ${new URL(PAGE).host}`, enabled: false }]
+      : [{
+          label: "Restart server",
+          click: () => {
+            // Kill and let the exit handler bring it back; the reload rides on ready.
+            crashRestarts = -1; // the deliberate kill is not a crash
+            serverChild?.kill();
+          },
+        }]),
     { type: "separator" },
     { label: "Quit — keeps the box running", click: () => app.quit() },
   ]);
@@ -536,8 +580,14 @@ if (!app.requestSingleInstanceLock()) {
         )
       );
     }
+    if (REMOTE_ERROR) {
+      dialog.showErrorBox("LumenBox remote mode", REMOTE_ERROR);
+      app.quit();
+      return;
+    }
     applyStartupItemSettings();
-    startServer();
+    if (REMOTE) log(`remote mode: ${PAGE}`);
+    else startServer();
     createTray();
     createWindow();
     startMemoryGuard();
@@ -546,6 +596,12 @@ if (!app.requestSingleInstanceLock()) {
     // a Docker engine that is still waking. Ask the server to sweep the vendors now rather
     // than at the next ten-minute tick — the box watch recovers on its own within a minute.
     powerMonitor.on("resume", () => {
+      if (REMOTE) {
+        // The server never slept; only this side's sockets may be stale.
+        log("system resumed; reconnecting the remote event stream");
+        watchEvents();
+        return;
+      }
       log("system resumed; asking the server to sweep the chat channels");
       setTimeout(() => {
         fetch(`http://127.0.0.1:${PORT}/api/channels/sweep`, { method: "POST", headers: uiAuth.headers }).then(response => {
