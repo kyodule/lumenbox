@@ -204,6 +204,16 @@ supervise() {
   done
 }
 
+# LUMENBOX-FORK: this machine's UI token must not be inherited by the box (docs/10 S-4).
+# An agent's shell, its browser profile and every tool result share the environment, so a
+# token that arrives here would be readable there. It is lifted out before boxd starts and
+# handed back to the orchestrator alone, below. A plain box container keeps its own token.
+LUMENBOX_UI_TOKEN=""
+if [[ "${AGENTBOX_HOST_ENABLED:-0}" = "1" ]]; then
+  LUMENBOX_UI_TOKEN="${AGENTBOX_UI_TOKEN:-}"
+  unset AGENTBOX_UI_TOKEN
+fi
+
 log "starting boxd"
 supervise boxd as_user box env HOME=/home/box BOXD_TOKEN="${BOXD_TOKEN}" \
   node /opt/boxd/boxd.cjs &
@@ -236,6 +246,14 @@ mkdir -p "${AGENTBOX_HOME}"
 chown -R hostd:hostd /home/hostd 2>/dev/null || true
 chmod 700 /home/hostd "${AGENTBOX_HOME}" 2>/dev/null || true
 
+# LUMENBOX-FORK: the same token on disk, 0600 and hostd-owned, so the web can name it in
+# what agents are shown (src/config.ts hostTokens) and redact it out of tool results.
+if [[ -n "${LUMENBOX_UI_TOKEN}" ]]; then
+  printf '%s\n' "${LUMENBOX_UI_TOKEN}" > "${AGENTBOX_HOME}/ui-token"
+  chown hostd:hostd "${AGENTBOX_HOME}/ui-token"
+  chmod 600 "${AGENTBOX_HOME}/ui-token"
+fi
+
 log "starting the orchestrator as hostd (web UI on 7777)"
 # Over loopback: the orchestrator and the daemon are in the same container now, so this
 # is the same HTTP contract with the network hop removed.
@@ -244,6 +262,7 @@ supervise hostd as_user hostd env \
   AGENTBOX_HOME="${AGENTBOX_HOME}" \
   AGENTBOX_BOXD_URL="http://127.0.0.1:1337" \
   AGENTBOX_TOKEN="${BOXD_TOKEN}" \
+  AGENTBOX_UI_TOKEN="${LUMENBOX_UI_TOKEN}" \
   AGENTBOX_VENDOR_DIR=/opt/hostd/vendor \
   ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
   MINIMAX_CODE_CN_API_KEY="${MINIMAX_CODE_CN_API_KEY:-}" \
