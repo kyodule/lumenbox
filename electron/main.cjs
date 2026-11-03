@@ -261,6 +261,9 @@ function appendSupervisionLog(line) {
 
 function startSupervision() {
   if (quitting || supervisionChild) return;
+  // LUMENBOX-FORK: supervision is a sidecar of a server on this Mac, hard-wired to a local
+  // door. In remote mode that server is on the VM, so it is not started at all.
+  if (REMOTE) { log("supervision: not started (the server is remote)"); return; }
   const cli = path.join(REPO, "src", "cli.ts");
   const startedAt = Date.now();
   supervisionChild = spawn(process.execPath, ["--experimental-transform-types", cli, "supervision", "--url", `http://127.0.0.1:${PORT}`], {
