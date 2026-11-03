@@ -3504,8 +3504,7 @@ export async function dispatchTool(
         };
       }
       const command = String(input.command ?? "").trim();
-      if (command === "") return { text: "`command` is required.", isError: true };
-      if (context.hostRunner.refusesSecrets && Array.isArray(input.secrets) && input.secrets.length > 0) return { text: DESKTOP_SECRETS_REFUSAL, isError: true };
+      if (command === "") return { text: "`command` is required.", isError: true }; if (context.hostRunner.refusesSecrets && Array.isArray(input.secrets) && input.secrets.length > 0) return { text: DESKTOP_SECRETS_REFUSAL, isError: true }; // LUMENBOX-FORK
       let erased: string[] = [];
 
       // Named secrets, resolved through the vault against this agent's grants, audited there; a refused one is
@@ -3523,7 +3522,6 @@ export async function dispatchTool(
 
       try {
         const result = await context.hostRunner.run(command, secrets.env, callFor(context).call).finally(() => { erased = secrets.finish().erased; });
-
         const parts = [
           result.stdout.trim() !== "" ? result.stdout : "(no stdout)",
           result.stderr.trim() !== "" ? `stderr:\n${result.stderr}` : "",
