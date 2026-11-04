@@ -62,6 +62,14 @@ const DOWNLOAD_ROOT = process.env.AGENTBOX_WORK_DIR ?? "/home/box/work";
  */
 const MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 
+/**
+ * A path that is not there. A definite answer, so it is a 4xx and not the 500 that means
+ * "the box broke and the effect is unknown" (INV-400): a caller that reads it as a crash
+ * checks for damage and tells the person the work is unaccounted for, when the file was
+ * simply never written.
+ */
+export class NotFoundError extends Error {}
+
 /** Media types worth naming, so a browser renders rather than downloads what it can show. */
 const MEDIA_TYPES: Record<string, string> = {
   ".md": "text/markdown; charset=utf-8",
@@ -117,7 +125,7 @@ async function requireDownloadable(path: string | undefined): Promise<string> {
   } catch {
     // Report the requested path, not the resolved one: a "no such file" naming a path the caller
     // never typed is a confusing answer to a typo.
-    throw new Error(`${requested} does not exist`);
+    throw new NotFoundError(`${requested} does not exist`);
   }
   const root = await realpath(DOWNLOAD_ROOT).catch(() => DOWNLOAD_ROOT);
   if (real !== root && !real.startsWith(`${root}/`)) {
@@ -163,7 +171,7 @@ export async function uploadFile(request: UploadFileRequest): Promise<UploadFile
   const parent = dirname(requested);
   const root = await realpath(DOWNLOAD_ROOT).catch(() => DOWNLOAD_ROOT);
   const realParent = await realpath(parent).catch(() => {
-    throw new Error(`${parent} does not exist`);
+    throw new NotFoundError(`${parent} does not exist`);
   });
   if (realParent !== root && !realParent.startsWith(`${root}/`)) {
     throw new Error(`${requested} is outside ${DOWNLOAD_ROOT}; only that tree accepts uploads`);

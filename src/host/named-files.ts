@@ -30,13 +30,28 @@ const WORK_ROOT = "/home/box/work";
  */
 export function boxPathsNamed(reply: string): string[] {
   const found: string[] = [];
-  for (const match of reply.matchAll(/\/home\/box\/work\/[^\s`'"()<>[\]，。、）]+/g)) {
-    const path = match[0].replace(/[.,;:!?]+$/, "");
+  // Chinese puts no spaces between words, so the boundary has to include the full-width marks
+  // as well: "…/x.md每个案例…" is a sentence, not a path, and a path that swallowed it can only
+  // fail to open. The marks are listed one by one because a character class cannot say
+  // "non-ASCII punctuation".
+  for (const match of reply.matchAll(/\/home\/box\/work\/[^\s`'"()<>[\]，。、）．：；！？…「」『』【】《》〈〉·～]+/g)) {
+    const path = endsAtExtension(match[0].replace(/[.,;:!?]+$/, ""));
     // A bare directory is not a deliverable, and neither is the work root itself.
     if (path === WORK_ROOT || !/\.[A-Za-z0-9]{1,8}$/.test(path)) continue;
     if (!found.includes(path)) found.push(path);
   }
   return found;
+}
+
+/**
+ * A path the reply ran into words with ends at its extension: in "…/x.md每个案例" the file is
+ * `x.md`. The last extension that a non-ASCII character or the end follows wins, so
+ * `/home/box/work/v1.2.md` stays whole rather than being cut at `.2`.
+ */
+function endsAtExtension(candidate: string): string {
+  let end = candidate.length;
+  for (const mark of candidate.matchAll(/\.[A-Za-z0-9]{1,8}(?=$|[^\p{ASCII}])/gu)) end = mark.index + mark[0].length;
+  return candidate.slice(0, end);
 }
 
 /**

@@ -56,3 +56,23 @@ test("each path is offered once however many times the reply says it", () => {
   const reply = "at /home/box/work/a.md — again, /home/box/work/a.md — and /home/box/work/b.md";
   assert.deepEqual(boxPathsNamed(reply), ["/home/box/work/a.md", "/home/box/work/b.md"]);
 });
+
+test("a path running straight into Chinese text stops at its extension", () => {
+  // Chinese puts no spaces between words, so this is the shape that broke delivery: the whole
+  // sentence became the path and the download could only fail.
+  assert.deepEqual(boxPathsNamed("完整版在 /home/box/work/a.md每个案例写清楚三件事"), ["/home/box/work/a.md"]);
+  assert.deepEqual(boxPathsNamed("完整版在 /home/box/work/a.md．每个案例"), ["/home/box/work/a.md"]);
+  assert.deepEqual(boxPathsNamed("完整版在 /home/box/work/a.md：每个案例"), ["/home/box/work/a.md"]);
+});
+
+test("a Chinese filename survives, and a dotted stem is not cut early", () => {
+  assert.deepEqual(boxPathsNamed("报告在 /home/box/work/报告.md每个案例"), ["/home/box/work/报告.md"]);
+  assert.deepEqual(boxPathsNamed("草稿在 /home/box/work/v1.2.md每个案例"), ["/home/box/work/v1.2.md"]);
+});
+
+test("the reply from the report is read cleanly", () => {
+  assert.deepEqual(
+    boxPathsNamed("……保存到 /home/box/work/ai-agent-attacks-2026-08-to-11.md"),
+    ["/home/box/work/ai-agent-attacks-2026-08-to-11.md"]
+  );
+});
