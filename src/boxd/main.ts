@@ -96,7 +96,7 @@ import { AcpOpenError, AcpService } from "./acp-service.ts";
 import { JobService } from "./job-service.ts"; import { JobLimitError, jobLimitsFrom } from "./job-limits.ts"; import { logLimitsFrom } from "./log-retention.ts"; import { diskSpace, outputLimitsFrom } from "./job-output-guard.ts";
 import { BrowserService, StaleSnapshotError, IrreversibleActionError } from "./browser-service.ts";
 import { BrowserEndpointRegistry, EndpointConflictError } from "./browser-endpoints.ts";
-import { currentRoots, downloadFile, listDir, readFile, uploadFile, writeFile } from "./fs-service.ts";
+import { currentRoots, downloadFile, listDir, NotFoundError, readFile, uploadFile, writeFile } from "./fs-service.ts";
 import { headlessRefusal } from "./headless.ts"; import { ConfinementRefused, confinementFor } from "./confinement.ts"; import { nativeScreenFor } from "./native-screen.ts";
 import { XWatchdogService } from "./xwatchdog-service.ts";
 import { DesktopOperations } from "./desktop-operations.ts";
@@ -1097,8 +1097,8 @@ const server = createServer((req, res) => {
                 ? 409
                 : error instanceof EndpointConflictError
                   ? 409
-                  : error instanceof StaleSnapshotError
-                    ? 409
+                  : error instanceof NotFoundError ? 404
+                  : error instanceof StaleSnapshotError ? 409
                     : error instanceof IrreversibleActionError
                       ? 428
                       : error instanceof CdpError
