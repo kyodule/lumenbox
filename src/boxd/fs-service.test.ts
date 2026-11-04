@@ -21,7 +21,7 @@ const ROOT = mkdtempSync(join(tmpdir(), "agentbox-work-"));
 const OUTSIDE = mkdtempSync(join(tmpdir(), "agentbox-outside-"));
 process.env.AGENTBOX_WORK_DIR = ROOT;
 
-const { uploadFile } = await import("./fs-service.ts");
+const { downloadFile, NotFoundError, uploadFile } = await import("./fs-service.ts");
 
 const base64 = (text: string) => Buffer.from(text).toString("base64");
 
@@ -114,4 +114,13 @@ test("with roots set, reads and writes outside them are refused, and inside they
     setRoots([]);
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a file that is not there is a definite no, not a crash", async () => {
+  // 404 through main.ts: "does not exist" is an answer, and a 500 tells the host the effect is
+  // unknown, which sends it looking for damage that never happened.
+  await assert.rejects(
+    downloadFile({ path: join(ROOT, "never-written.md") }),
+    (error: unknown) => error instanceof NotFoundError && /does not exist/.test((error as Error).message)
+  );
 });
