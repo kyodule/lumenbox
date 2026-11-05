@@ -174,7 +174,7 @@ export class CodexCommand {
     try {
       await this.rpc("initialize", { clientInfo: { name: "lumenbox_host_task", version: "1" }, capabilities: { experimentalApi: true } });
       this.child.stdin.write(`${JSON.stringify({ method: "initialized", params: {} })}\n`);
-      if (this.stopped) throw new Error("Task cancelled during executor startup");
+      if (this.stopped || task.closed || task.grant.expiresAt <= Date.now()) throw new Error("Task cancelled or expired during executor startup");
       this.processId = `lumen-${task.grant.taskId}`;
       const result = await this.rpc("command/exec", { command: ["/bin/sh", "-c", command], cwd: task.workspace, permissionProfile: "lumen_task",
         processId: this.processId, timeoutMs: deadline, outputBytesCap: HOST_TASK_OUTPUT_BYTES, env });
