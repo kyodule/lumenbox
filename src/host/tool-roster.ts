@@ -57,6 +57,7 @@ export const RESIDENT_TOOLS: ReadonlySet<string> = new Set([
   "DingTalkWrite",
   // The door out of the box; approval-gated, and its absence is how "off" is signalled.
   "RunOnHost",
+  "HostTask",
 ]);
 
 /** The lookup pair itself: resident whenever anything is behind it. */

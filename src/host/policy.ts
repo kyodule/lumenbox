@@ -7,17 +7,6 @@
  * own idea of what a refusal looks like. Written as one decision point they are the same mechanism
  * asked four questions, and the fourth — approval — is a capability that would not otherwise exist.
  *
- * Three rules shape it, each from a failure someone else already had:
- *
- *   1. **The audit row is written before the action, not after.** "Who tried" is asked after
- *      incidents as often as "who did". A log written on success cannot answer the first.
- *   2. **State is on disk, never only in memory.** A pending approval that evaporates when the
- *      process restarts is worse than no approval: a person who clicked "allow" has no way to know
- *      their decision was lost, and the agent silently stalls forever.
- *   3. **A refusal explains itself, to the model.** A tool result saying "denied" teaches an agent
- *      nothing; one saying "denied: this tenant is over its 1,000,000-token budget for the month"
- *      lets it stop rather than retry.
- *
  * Two call sites, one decision maker. The turn loop asks about spending and about being allowed to
  * continue; tool dispatch asks about actions. Collapsing those into a single proxy in front of
  * everything was considered and rejected — this system already has the orchestrator and the box in
@@ -29,7 +18,7 @@
  * architecture exists to avoid. Limits arrive as configuration; enforcement is local.
  */
 
-import { SENSITIVE_INPUT_TTL_MS, type SensitiveInput } from "../protocol/sensitive-input.ts";
+import { SENSITIVE_INPUT_TTL_MS, type SensitiveInput } from "../protocol/sensitive-input.ts"; import { HostDataGuard } from "./host-data-guard.ts";
 import { classifyShell } from "./shell-readonly.ts";
 import { envNumber } from "../config.ts";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -101,6 +90,7 @@ export type PolicyRequest =
        * (and the fingerprint binds) carries it, so consent is to *that* button on *that* page.
        */
       irreversible?: string;
+      onceOnly?: true; // Trusted task request: a standing grant must never reopen a task.
       /** The turn this call belongs to, for the taint rule (INV-1309): set by dispatch, never by the model. */
       turnId?: string;
       /** Trusted box observation plus host execution identity, never model input (INV-955). */
@@ -286,7 +276,7 @@ type PolicyEvent =
   | { at: string; kind: "reply-refused"; purpose: string; chatKey: string; reason: string } // A host push whose purpose's claim did not hold (INV-1459).
   | { at: string; kind: "observed"; slug: string; would: string } // A routine in observe mode was triggered and did not run (INV-1458).
   | { at: string; kind: "resume"; agentId: string; by: string }
-  | { at: string; kind: "approval-requested"; id: string; fingerprint: string; agentId: string; description: string; action?: string; harnessResumes?: boolean }
+  | { at: string; kind: "approval-requested"; id: string; fingerprint: string; agentId: string; description: string; action?: string; harnessResumes?: boolean; onceOnly?: true }
   | { at: string; kind: "approval-granted"; id: string; by: string }
   | { at: string; kind: "approval-granted-session"; id: string; by: string }
   | {
@@ -375,6 +365,10 @@ export interface PolicyGateOptions {
  * order they happened in.
  */
 export class PolicyGate {
+  private readonly hostData: HostDataGuard;
+  private readonly stopListeners = new Set<(agentId: string) => void>();
+  onStop(listener: (agentId: string) => void): void { this.stopListeners.add(listener); }
+  markHostRead(agentId: string): void { this.hostData.mark(agentId); }
   private readonly path: string;
   private readonly limits: PolicyLimits;
   private readonly now: () => Date;
@@ -441,7 +435,7 @@ export class PolicyGate {
     // which; the agent's own id when nobody wired it, which is what a unit test is.
     this.subjectOf = options.boxOf ?? ((agentId: string) => agentId);
     this.egressAllow = options.egressAllow ?? (() => []);
-    this.replay();
+    this.hostData = new HostDataGuard(`${this.path}.host-data.json`); this.replay();
   }
 
   // ── the question ────────────────────────────────────────────────────────────────────
@@ -489,7 +483,7 @@ export class PolicyGate {
         return { allow: false, reason };
       }
     }
-    if (request.kind === "tool" && decision.allow) noteAllowedCall(this.taint, request, this.externalTool);
+    if (request.kind === "tool" && decision.allow) { this.hostData.allowed(request); noteAllowedCall(this.taint, request, this.externalTool); }
     // Only a durably recorded human grant can seed reuse. An allowed ordinary call cannot.
     if (decision.allow && inputGrant !== undefined && consequence?.kind === "approval-used") {
       const scope = this.turnInputs.get(inputGrant.key);
@@ -626,7 +620,7 @@ export class PolicyGate {
     this.lastRule = undefined;
     // The taint rules (INV-1309 egress after a vault read, INV-1366 first use after an outside
     // read): nothing the operator's lists say lifts them, and the answer is only ever "once".
-    this.lastTaint = taintOf(request, this.taint, this.egressAllow(request.agentId));
+    this.lastTaint = this.hostData.taint(request) ?? taintOf(request, this.taint, this.egressAllow(request.agentId));
     // What the call does to the world (INV-691). The box's finding outranks the declaration:
     // a click is `self` until the box says this click pays.
     const effect = sideEffectOf(request.tool, request.input);
@@ -715,7 +709,7 @@ export class PolicyGate {
     // A standing or session grant covers this exact action without being consumed.
     // Each use still writes an approval-used row, so the audit trail says every time
     // the grant did work, not only the day it was given.
-    const standing = this.always.get(fingerprint);
+    const standing = request.onceOnly || this.lastTaint ? undefined : this.always.get(fingerprint);
     if (standing !== undefined) {
       return {
         decision: { allow: true },
@@ -723,7 +717,7 @@ export class PolicyGate {
         consequence: { at: this.now().toISOString(), kind: "approval-used", id: standing.id },
       };
     }
-    const sessionGrant = this.session.get(fingerprint);
+    const sessionGrant = request.onceOnly || this.lastTaint ? undefined : this.session.get(fingerprint);
     if (sessionGrant !== undefined) {
       return {
         decision: { allow: true },
@@ -762,7 +756,7 @@ export class PolicyGate {
       description,
       ...(effect.action !== undefined ? { action: effect.action } : {}),
       requestedAt: this.now().toISOString(),
-      ...(this.lastTaint !== undefined ? { onceOnly: true as const } : {}),
+      ...(this.lastTaint !== undefined || request.onceOnly === true ? { onceOnly: true as const } : {}),
     };
     this.awaiting.set(fingerprint, approval);
     this.log(`waiting for a person to approve: ${description}`);
@@ -781,6 +775,7 @@ export class PolicyGate {
         agentId: approval.agentId,
         description,
         ...(approval.action !== undefined ? { action: approval.action } : {}),
+        ...(approval.onceOnly === true ? { onceOnly: true as const } : {}),
       },
     };
   }
@@ -848,6 +843,7 @@ export class PolicyGate {
   stop(agentId: string, by = "user"): void {
     if (this.stopped.has(agentId)) return;
     this.stopped.add(agentId);
+    for (const listener of this.stopListeners) listener(agentId);
     this.append({ at: this.now().toISOString(), kind: "stop", agentId, by }); this.log(`${by} stopped ${agentId}`);
   }
 
@@ -1055,6 +1051,7 @@ export class PolicyGate {
             agentId: event.agentId,
             agentName: "",
             description: event.description,
+            ...(event.onceOnly === true ? { onceOnly: true as const } : {}),
             ...(event.action !== undefined ? { action: event.action } : {}),
             ...(event.harnessResumes === true ? { harnessResumes: true } : {}),
             requestedAt: event.at,

@@ -35,9 +35,10 @@ import { permitted } from "../egress/relay.ts";
  * connector's or an MCP server's result), so the first call to a service this turn has not used
  * yet asks (INV-1366) — even a read sends its arguments, which the outside text may have chosen.
  */
-export type TaintSource = "vault" | "outside";
+export type TaintSource = "vault" | "outside" | "host";
 
 const SOURCE_TEXT: Record<TaintSource, string> = {
+  host: "private project data from the person's Mac",
   vault: "a vault secret",
   outside: "content from outside the box",
 };
@@ -48,7 +49,7 @@ export interface Taint {
   /** Where the call would reach, in the words the card and the record use. */
   target: string;
   /** Which rule asked: leaving the allow list (default) or a service's first use this turn. */
-  rule?: "egress" | "first-use";
+  rule?: "egress" | "first-use" | "host-data";
 }
 
 /** Where a call would reach: hosts the host could read off the input, or a target it could not. */
@@ -222,6 +223,7 @@ export function serviceOf(tool: string, input: Record<string, unknown>): { key: 
 /** The card's and the record's words for a taint: the kind of thing read, never its content. */
 export function describeTaint(taint: Taint): string {
   const read = taint.sources.map(source => SOURCE_TEXT[source]).join(" and ");
+  if (taint.rule === "host-data") return `[local data: context includes ${read}; approve its use by ${taint.target}]`;
   if (taint.rule === "first-use") return `[tainted: this turn read ${read}; this is its first call to ${taint.target}]`;
   return `[tainted: this turn read ${read}; ${taint.target} is outside the box's egress allow list]`;
 }

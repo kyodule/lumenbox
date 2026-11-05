@@ -108,6 +108,7 @@ const DECLARED: Record<string, SideEffect> = {
 
   // Authority.
   RunOnHost: { tier: "credential", action: "run a command on the person's own machine" },
+  HostTask: { tier: "self" }, // start has a mandatory task gate; run is bounded by that grant.
   browser_fill_secret: { tier: "credential", action: "type a stored secret into a web page" },
   CreateAgent: { tier: "credential", action: "create a new agent with its own tools" },
   UpdateAgent: { tier: "credential", action: "change an agent's tools or instructions" },

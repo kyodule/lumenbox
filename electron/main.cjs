@@ -502,6 +502,8 @@ function createWindow() {
 const HOST_EXEC_FILE = path.join(process.env.AGENTBOX_HOME || path.join(os.homedir(), ".agentbox"), "host-exec.json");
 const HOST_EXEC_RUNNER = path.join(__dirname, "host-exec-runner.ts");
 const HOST_EXEC_APPROVAL_MS = 120_000;
+const { HostTaskClient } = require("./host-task-client.cjs");
+const hostTasks = new HostTaskClient({ configPath: path.join(path.dirname(HOST_EXEC_FILE), "host-tasks.json"), page: PAGE, client: pageClient, headers: uiAuth.headers, executable: process.execPath, log, onStatus: () => updateTrayMenu() });
 const hostExecQueue = [];
 const hostExecSeen = new Set();
 let hostExecRequest = null;
@@ -561,6 +563,9 @@ function hostExecTrayItems() {
     { label: "Ask every time", type: "radio", checked: config.mode === "ask", click: choose("ask") },
     { label: "Always allow", type: "radio", checked: config.mode === "always", click: choose("always") },
     { label: where, enabled: false },
+    { label: hostTasks.status, enabled: false },
+    { label: "Choose task projects…", click: () => hostTasks.chooseProjects(dialog, mainWindow) },
+    { label: "Stop project task", click: () => hostTasks.start(REMOTE && readHostExec().mode !== "off") },
   ];
 }
 
@@ -573,6 +578,7 @@ function watchHostExec() {
   hostExecQueue.length = 0;
   const config = readHostExec();
   updateTrayMenu();
+  hostTasks.start(REMOTE && config.mode !== "off");
   if (hostExecError) log(`host exec: ${hostExecError}`);
   if (!REMOTE || config.mode === "off") return;
   let retried = false;
@@ -740,6 +746,7 @@ function runHostExecChild(job) {
 
 /** An edit to host-exec.json by hand takes effect like a tray change: reconnect only when the effective config changed. */
 function watchHostExecFile() {
+  hostTasks.watch(() => watchHostExec());
   let last = JSON.stringify(readHostExec());
   fs.watchFile(HOST_EXEC_FILE, { interval: 2000 }, () => {
     const now = JSON.stringify(readHostExec());
@@ -873,6 +880,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("window-all-closed", () => {});
   app.on("activate", () => createWindow());
   app.on("before-quit", () => {
+    hostTasks.stop();
     quitting = true;
     serverChild?.kill();
     supervisionChild?.kill();

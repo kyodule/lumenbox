@@ -206,6 +206,7 @@ export class HostRunner {
 // POST /api/host-exec/result. The Mac decides whether to run it: its own switch, directory,
 // network and sandbox; this side only carries.
 
+import { DesktopHostTasks } from "./host-tasks.ts";
 interface PendingDesktopRun {
   resolve: (result: HostRunResult) => void;
   reject: (error: Error) => void;
@@ -235,6 +236,7 @@ export const DESKTOP_SECRETS_REFUSAL =
   "Secrets are not sent to the person's Mac. Run the command without `secrets`; git on the Mac uses the Mac's own ssh keys or keychain.";
 
 export class DesktopHostRunner extends HostRunner {
+  readonly tasks = new DesktopHostTasks();
   private seat: { id: number; write: (frame: string) => void } | undefined;
   private seats = 0;
   private readonly pending = new Map<string, PendingDesktopRun>();
@@ -359,6 +361,7 @@ export class DesktopHostRunner extends HostRunner {
     refusedRole: (need: "admin") => boolean,
     readJson: (req: IncomingMessage) => Promise<unknown>,
   ): Promise<boolean> {
+    if (await this.tasks.serve(route, req, res, send, refusedRole, readJson)) return true;
     if (route !== "GET /api/host-exec/stream" && route !== "POST /api/host-exec/result") return false;
     if (refusedRole("admin")) return true;
     if (route === "POST /api/host-exec/result") {

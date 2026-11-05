@@ -2067,7 +2067,7 @@ ${outcome.text}`;
     isForkConversation(conversation),
     // Connected services (INV-422): offered only where a live grant covers this agent —
     // the box's bundles or the secret's own grants — and never to a fork.
-    isForkConversation(conversation) ? [] : connectorsFor(deps, agent, registry)
+    isForkConversation(conversation) ? [] : connectorsFor(deps, agent, registry), "tasks" in (deps.hostRunner ?? {}) && Boolean((deps.hostRunner as import("./host-runner.ts").DesktopHostRunner)?.tasks?.available)
   )
     // Only an agent the person actually talks to may reach them (docs/42 §2). A worker created by another agent
     // and woken only by teammates has a chat nobody is reading, and its question would sit there unseen; what

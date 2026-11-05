@@ -41,6 +41,7 @@ const DETAIL_MAX = 40;
 const TEMPLATES: Record<string, Template> = {
   bash: { en: "running a command ({detail})", zh: "运行命令({detail})" },
   RunOnHost: { en: "running a command on the host ({detail})", zh: "在主机上运行命令({detail})" },
+  HostTask: { en: "working on the authorized Mac project task", zh: "处理已授权的 Mac 项目任务" },
   read_file: { en: "reading {detail}", zh: "读取文件 {detail}" },
   write_file: { en: "writing {detail}", zh: "写入文件 {detail}" },
   edit_file: { en: "editing {detail}", zh: "编辑文件 {detail}" },
