@@ -185,7 +185,7 @@ test("local policy requires the accepted cancellation contract and keeps toolcha
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("an executor process exit alone cannot confirm command cleanup when terminate RPC fails", { skip: process.platform === "win32" }, async () => {
+test("executor startup respects expiry, and exit alone cannot confirm cleanup when terminate RPC fails", { skip: process.platform === "win32" }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "host-stop-receipt-")), executor = new CodexCommand();
   try {
     const source = join(dir, "source"), control = join(dir, "broker"); mkdirSync(source); mkdirSync(control);
@@ -193,7 +193,7 @@ test("an executor process exit alone cannot confirm command cleanup when termina
     writeFileSync(runtime, `#!${process.execPath}\n` +
       `if(process.argv.includes('--version')){console.log('codex-cli ${CODEX_TASK_VERSION}');process.exit(0)}\n` +
       "require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);" +
-      "if(m.method==='initialize')console.log(JSON.stringify({id:m.id,result:{}}));" +
+      "if(m.method==='initialize'){require('node:fs').writeFileSync('initialized','yes');setTimeout(()=>console.log(JSON.stringify({id:m.id,result:{}})),require('node:fs').existsSync('slow-start')?800:0);}" +
       "if(m.method==='command/exec')require('node:fs').writeFileSync(require('node:path').join(m.params.cwd,'started'),'yes');" +
       "if(m.method==='command/exec/terminate')console.log(JSON.stringify({id:m.id,error:{message:'fixture: termination unconfirmed'}}));});\n", { mode: 0o700 });
     writeFileSync(config, JSON.stringify({ enabled: true, cancellation: HOST_TASK_CANCELLATION, deviceId: "fixture-device", roots: [source],
@@ -207,6 +207,11 @@ test("an executor process exit alone cannot confirm command cleanup when termina
     assert.ok(existsSync(join(task.workspace, "started")), "fake command reached the cancellation point");
     const receipt = await executor.stop(); await executing;
     assert.equal(receipt.managedProcesses, "unconfirmed"); assert.equal(receipt.detachedProcesses, "may-remain");
+    writeFileSync(join(source, "slow-start"), "fixture");
+    const expiring = createLocalTask(policy, { ...task.grant, taskId: "expiring-task", grantId: "expiring-grant", expiresAt: Date.now() + 200 });
+    await assert.rejects(new CodexCommand().run(policy, expiring, "must not dispatch after initialization", 5000), /expired during executor startup/);
+    assert.ok(existsSync(join(expiring.workspace, "initialized")));
+    assert.equal(existsSync(join(expiring.workspace, "started")), false, "expiry during initialization prevents command dispatch");
   } finally { await executor.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 
