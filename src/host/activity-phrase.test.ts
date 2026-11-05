@@ -10,7 +10,7 @@ function everyTool(): string[] {
   const before = process.env[key];
   process.env[key] = "offered-for-the-guard";
   try {
-    return buildTools(true, true, undefined, true, true, true, true, false, ["github"]).map(tool => tool.name);
+    return buildTools(true, true, undefined, true, true, true, true, false, ["github"], true).map(tool => tool.name);
   } finally {
     if (before === undefined) delete process.env[key];
     else process.env[key] = before;

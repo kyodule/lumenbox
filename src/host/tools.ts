@@ -74,7 +74,7 @@ import { guardMemoryCandidate } from "./memory-guard.ts";
 import type { ModelRelay } from "./model-relay.ts";
 import { type OAuthGate, type OAuthProvider, oauthProvider, scrubToken, tokenHeaders } from "./oauth.ts";
 import { dingtalkWrite, feishuWrite } from "./office-write-tools.ts";
-import { runOperationTool, withOperationTool } from "./operation-tool.ts";
+import { runOperationTool, withOperationTool } from "./operation-tool.ts"; import { HOST_TASK_TOOL, hostTaskTool } from "./host-task-tools.ts";
 import { type Orchestrations, parsePlan } from "./orchestrate.ts";
 import { type CommitHow, forkTag, type PendingWork } from "./pending-work.ts";
 import type { PolicyGate } from "./policy.ts";
@@ -716,9 +716,9 @@ export function buildTools(
   /** Whether this is a fork child's tool list (docs/32 §2): the withheld set is removed. */
   fork = false,
   /** The connected services this agent may call through the OAuth gate (INV-422), by provider id. */
-  connectors: readonly string[] = []
+  connectors: readonly string[] = [], hasHostTasks = false
 ): Anthropic.Tool[] {
-  const tools: Anthropic.Tool[] = [];
+  const tools: Anthropic.Tool[] = hasHostTasks && !fork ? [HOST_TASK_TOOL] : [];
 
   if (connectors.length > 0) {
     tools.push({
@@ -2633,8 +2633,8 @@ export async function dispatchTool(
   input: Record<string, unknown>,
   context: ToolContext
 ): Promise<ToolOutcome> {
-  // Before the switch, so no tool added later can bypass it. A refusal comes back as a tool error:
-  // the model sees why, and can stop or ask, rather than retrying into a wall.
+  if (name === "HostTask") return hostTaskTool(input, context); // Own gate binds trusted scope before asking.
+  // Before the switch, so no tool added later can bypass the policy gate.
   const decision = context.policy?.check({
     kind: "tool",
     agentId: context.agent.id,
@@ -3521,7 +3521,7 @@ export async function dispatchTool(
       if (granted.length > 0) context.policy?.taint.mark(context.turnId ?? "", "vault");
 
       try {
-        const result = await context.hostRunner.run(command, secrets.env, callFor(context).call).finally(() => { erased = secrets.finish().erased; });
+        const result = await context.hostRunner.run(command, secrets.env, callFor(context).call, context.agent.profile.name).finally(() => { erased = secrets.finish().erased; });
         const parts = [
           result.stdout.trim() !== "" ? result.stdout : "(no stdout)",
           result.stderr.trim() !== "" ? `stderr:\n${result.stderr}` : "",

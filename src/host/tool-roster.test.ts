@@ -6,7 +6,7 @@ import { declaredTools } from "./side-effects.ts";
 import { describeDeferred, lookupPair, RESIDENT_TOOLS, splitRoster } from "./tool-roster.ts";
 import { buildTools, dispatchTool } from "./tools.ts";
 
-const everything = buildTools(true, true, undefined, true, true, true, true, false, ["feishu", "dingtalk"]);
+const everything = buildTools(true, true, undefined, true, true, true, true, false, ["feishu", "dingtalk"], true);
 
 test("with every flag on, the list a model sees is at most 30 definitions, and every built-in is either resident or deferred — none dropped", () => {
   const { resident, deferred } = splitRoster(everything);
