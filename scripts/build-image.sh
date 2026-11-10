@@ -13,7 +13,8 @@ pins() {
   curl -fsSL "https://api.github.com/repos/$UPSTREAM/releases/tags/$1" | python3 -c '
 import json, re, sys
 body = json.load(sys.stdin).get("body") or ""
-names = {"OPENCODE_VERSION": r"opencode", "CLAUDE_CODE_VERSION": r"Claude Code", "PI_VERSION": r"\bpi", "MCODE_VERSION": r"\bmcode"}
+# Upstream wrote "Claude Code 2.1.250" up to 0.3.12 and "claude 2.1.250" from 0.3.28 on.
+names = {"OPENCODE_VERSION": r"opencode", "CLAUDE_CODE_VERSION": r"(?i:claude(?: code)?)", "PI_VERSION": r"\bpi", "MCODE_VERSION": r"\bmcode"}
 missing = []
 for var, name in names.items():
     m = re.search(name + r"\s+v?(\d+\.\d+\.\d+)", body)
