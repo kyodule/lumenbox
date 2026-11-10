@@ -79,6 +79,10 @@ test("owner, root, device, connection and task limits cannot be widened by model
     assert.ok(!buildTools(true).some(t => t.name === "HostTask"));
     assert.ok(buildTools(true, true, undefined, true, true, false, false, false, [], true).some(t => t.name === "HostTask"));
     assert.ok(!buildTools(true, true, undefined, true, true, false, false, true, [], true).some(t => t.name === "HostTask"));
+    // An agent with an explicit tool list holds it only by name, and the profile routes accept only ALL_TOOLS names.
+    assert.ok(buildTools(true, true, ["bash", "HostTask"], true, true, false, false, false, [], true).some(t => t.name === "HostTask"));
+    assert.ok(!buildTools(true, true, ["bash", "RunOnHost"], true, true, false, false, false, [], true).some(t => t.name === "HostTask"));
+    assert.ok((await import("./orchestrator.ts")).ALL_TOOLS.includes("HostTask"));
   } finally { f.cleanup(); }
 });
 

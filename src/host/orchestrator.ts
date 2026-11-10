@@ -2683,6 +2683,7 @@ export const ALL_TOOLS: readonly string[] = [
   "HandBack",
   "Goal",
   "RunOnHost",
+  "HostTask", // Offered only while the Mac executor is connected; unlisted, no explicit allowlist could hold it.
   // Offered only when a connection exists (INV-422, INV-754) — and until they were listed here, the
   // starter team never saw them even then: an allowlist withholds what it does not name.
   "connector_request",
