@@ -27,15 +27,16 @@ test("only an approval a turn in this conversation is parked on holds it; other 
   assert.match(describeHolding(approval({ requestedAt: new Date(T0 - 3 * 86_400_000).toISOString() }), T0), /3 d 前/);
 });
 
-test("an approval nothing waits on expires with its reason; one still held does not; a day old expires whatever holds it; a harness-resumed one waits for its day", () => {
+test("an approval nothing waits on expires with its reason after 30 minutes; one still held does not; a day old expires whatever holds it; a harness-resumed one waits for its day", () => {
   const held = approval({});
-  const orphan = approval({ id: "ap-2", fingerprint: "f2" });
+  const orphan = approval({ id: "ap-2", fingerprint: "f2", requestedAt: new Date(T0 - 31 * 60_000).toISOString() });
+  const fresh = approval({ id: "ap-5", fingerprint: "f5" }); // its turn ended a minute ago: the person may still be on the way
   const old = approval({ id: "ap-3", fingerprint: "f3", requestedAt: new Date(T0 - 25 * 3_600_000).toISOString() });
   const harness = approval({ id: "ap-4", fingerprint: "f4", harnessResumes: true });
   const turns = ledger([turn({})], { t1: ["ap-1", "ap-3"] });
-  const stale = staleApprovals(turns, [held, orphan, old, harness], T0);
+  const stale = staleApprovals(turns, [held, orphan, old, harness, fresh], T0);
   assert.deepEqual(stale.map(s => s.id), ["ap-2", "ap-3"]);
-  assert.match(stale[0]!.reason, /turn that asked has ended/);
+  assert.match(stale[0]!.reason, /turn that asked has ended and nobody answered in 30 minutes/);
   assert.match(stale[1]!.reason, /waited 25 hours/);
   assert.deepEqual(staleApprovals(undefined, [held, orphan, old], T0).map(s => s.id), ["ap-3"], "without a ledger only age expires");
   assert.deepEqual(staleApprovals(turns, [orphan], T0, 7 * 86_400_000).map(s => s.id), ["ap-2"]);
