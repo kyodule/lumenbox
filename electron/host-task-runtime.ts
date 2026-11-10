@@ -6,7 +6,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { homedir } from "node:os";
 import { HOST_TASK_CANCELLATION, HOST_TASK_COMMAND_MS, HOST_TASK_OUTPUT_BYTES, HOST_TASK_TTL_MS, hostTaskId, type HostTaskCapabilities, type HostTaskGrant, type HostTaskResult, type HostTaskCleanup } from "../src/host/host-task-protocol.ts";
 
-export const CODEX_TASK_VERSION = "0.166.0-alpha.5.1";
+export const CODEX_TASK_VERSION = "0.167.0";
 export interface TaskPolicy { capabilities: HostTaskCapabilities; runtimePath: string; storage: string; toolchainBinPaths: string[]; toolchainLibraryPaths: string[]; nodeBinary?: string }
 export function loadTaskPolicy(configPath: string): TaskPolicy {
   const raw = JSON.parse(readFileSync(configPath, "utf8"));
