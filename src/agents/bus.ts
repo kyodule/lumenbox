@@ -137,7 +137,7 @@ export interface InboundMessage {
    * webhook's own brief was drawn in the chat as the person's words, and the turn was treated
    * as one the person was waiting on.
    */
-  synthetic?: boolean; /** Which part of the host wrote it, e.g. "host:audit" (INV-1571): never a person's words, whatever opened the turn. */ origin?: string;
+  synthetic?: boolean; /** Which part of the host wrote it, e.g. "host:audit" (INV-1571): never a person's words, whatever opened the turn. */ origin?: string; /** The approval a person allowed, on the system note that wakes the agent to go ahead. */ answeredApproval?: string;
   /**
    * A person said this in a room without addressing this agent (INV-775): a group message
    * that names nobody, on a door that runs every message. The turn is a person's, but nobody
@@ -703,7 +703,7 @@ export class AgentBus {
    * so it opens a turn of its own once the conversation is free, where the agent reads it
    * as what it is: a late report, not an instruction.
    */
-  deliverSystem(agentId: string, text: string, conversation: string = MAIN_CONVERSATION): number | undefined {
+  deliverSystem(agentId: string, text: string, conversation: string = MAIN_CONVERSATION, answeredApproval?: string): number | undefined {
     const seq = this.enqueue(agentId, {
       id: randomUUID(),
       fromId: SYSTEM_SENDER,
@@ -711,7 +711,7 @@ export class AgentBus {
       text: clampMessage(text, AGENT_MESSAGE_MAX_LENGTH),
       priority: false,
       receivedAt: new Date().toISOString(),
-      ...(conversation !== MAIN_CONVERSATION ? { conversation } : {}),
+      ...(conversation !== MAIN_CONVERSATION ? { conversation } : {}), ...(answeredApproval !== undefined ? { answeredApproval } : {}),
     });
     void this.wake(agentId);
     return seq;

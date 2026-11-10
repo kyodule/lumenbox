@@ -5470,7 +5470,7 @@ export async function startWebServer(options: WebOptions): Promise<() => void> {
               waiting.agentId,
               allowed
                 ? `[The person allowed it${scope === "once" ? " once" : scope === "session" ? " for this session" : ", standing until revoked"}: ${waiting.description}. Go ahead now.]`
-                : `[The person refused it: ${waiting.description}. Do not retry it; do without, or say what cannot be done.]`
+                : `[The person refused it: ${waiting.description}. Do not retry it; do without, or say what cannot be done.]`, MAIN_CONVERSATION, allowed ? id : undefined // the wake names the approval, so it acts for whoever asked
             );
           }
           send(res, 200, { id });

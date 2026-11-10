@@ -10,7 +10,9 @@ import { PolicyGate, DEFAULT_LIMITS } from "./policy.ts";
 import { RuleStore } from "./rules.ts";
 import { buildTools, dispatchTool, type ToolContext } from "./tools.ts";
 import { CONSOLE_OPERATOR } from "./host-task-tools.ts";
-import { notePersonTurn } from "./person-turns.ts";
+import { actingFor, noteApprovalWake, noteAskedFor, notePersonTurn, noteTurnOpened } from "./person-turns.ts";
+import { AgentRegistry, MAIN_CONVERSATION } from "../agents/registry.ts";
+import { AgentBus, type InboundMessage } from "../agents/bus.ts";
 import { type HostTaskJob, type HostTaskAnswer, type HostTaskCapabilities, HOST_TASK_CANCELLATION, HOST_TASK_TTL_MS } from "./host-task-protocol.ts";
 import { snapshotProject, clipOutput, loadTaskPolicy, createLocalTask, CodexCommand, CODEX_TASK_VERSION } from "../../electron/host-task-runtime.ts";
 
@@ -88,25 +90,54 @@ test("owner, root, device, connection and task limits cannot be widened by model
   } finally { f.cleanup(); }
 });
 
-test("a console with no signed-in identity: the person's turn and its continuation are the operator's, a teammate's wake is refused", async () => {
+test("a console with no signed-in identity: the person's turn asks, the wake of their approval starts and runs, a teammate's wake is refused", async () => {
   const f = fixture();
   try {
     const consoleTurn = { ...f.context, caller: undefined, turnId: "console-turn" } as ToolContext;
+    const approvalWake = { ...f.context, caller: undefined, turnId: "approval-wake" } as ToolContext;
     const teammateWake = { ...f.context, caller: undefined, turnId: "teammate-wake" } as ToolContext;
     assert.match((await dispatchTool("HostTask", { action: "list" }, teammateWake)).text, /turn a person opened/);
     notePersonTurn("console-turn");
     const question = await dispatchTool("HostTask", proposal, consoleTurn);
-    assert.ok(question.approval, question.text);
+    assert.ok(question.approval, question.text); assert.match(question.text, /call start again/);
     f.policy.grant(question.approval.id, "person", "once");
-    const start = await dispatchTool("HostTask", proposal, consoleTurn); // the continuation keeps the turn id
+    assert.ok((await dispatchTool("HostTask", proposal, approvalWake)).isError, "a wake that names no approval acts for nobody");
+    noteApprovalWake("approval-wake", "an-approval-nobody-asked-for");
+    assert.ok((await dispatchTool("HostTask", proposal, approvalWake)).isError);
+    noteApprovalWake("approval-wake", question.approval.id);
+    const start = await dispatchTool("HostTask", proposal, approvalWake);
     assert.ok(!start.isError, start.text);
     assert.equal(f.seat.frames[0]?.grant.principalId, CONSOLE_OPERATOR);
     const taskId = JSON.parse(start.text).taskId as string;
-    assert.ok(!(await dispatchTool("HostTask", { action: "run", taskId, command: "pwd" }, consoleTurn)).isError);
+    assert.ok(!(await dispatchTool("HostTask", { action: "run", taskId, command: "pwd" }, approvalWake)).isError);
     for (const other of [teammateWake, { ...consoleTurn, conversation: "fork/child" } as ToolContext, { ...consoleTurn, caller: { userId: "person" } } as ToolContext]) {
       assert.ok((await dispatchTool("HostTask", { action: "run", taskId, command: "pwd" }, other)).isError);
     }
+    // A signed-in person's approval wake carries no caller either; it acts for the person who asked.
+    const asked = await dispatchTool("HostTask", { ...proposal, purpose: "Signed-in review" }, { ...f.context, turnId: "signed-in-turn" } as ToolContext);
+    assert.ok(asked.approval, asked.text);
+    f.policy.grant(asked.approval.id, "person", "once");
+    noteApprovalWake("signed-in-wake", asked.approval.id);
+    const started = await dispatchTool("HostTask", { ...proposal, purpose: "Signed-in review" }, { ...f.context, caller: undefined, turnId: "signed-in-wake" } as ToolContext);
+    assert.ok(!started.isError, started.text);
+    assert.equal(f.seat.frames.at(-1)?.grant.principalId, "person");
   } finally { f.cleanup(); }
+});
+test("the approval's wake carries its id through the bus, and only that wake acts for the person who asked", async () => {
+  const root = mkdtempSync(join(tmpdir(), "approval-wake-"));
+  try {
+    const registry = new AgentRegistry(root); const ada = registry.create({ name: "Ada" });
+    const seen: InboundMessage[] = [];
+    const bus = new AgentBus(registry, (async (_agent: unknown, inbound: readonly InboundMessage[]) => { seen.push(...inbound); }) as never);
+    bus.deliverSystem(ada.id, "[The person allowed it once: HostTask start. Go ahead now.]", MAIN_CONVERSATION, "approval-1");
+    bus.deliverSystem(ada.id, "a late fork report");
+    for (let i = 0; i < 100 && seen.length < 2; i++) { await bus.wake(ada.id); await new Promise(resolve => setImmediate(resolve)); }
+    assert.deepEqual(seen.map(message => message.answeredApproval), ["approval-1", undefined]);
+    noteAskedFor("approval-1", CONSOLE_OPERATOR);
+    noteTurnOpened("wake-turn", false, seen.slice(0, 1)); assert.equal(actingFor("wake-turn"), CONSOLE_OPERATOR);
+    noteTurnOpened("report-turn", false, seen.slice(1)); assert.equal(actingFor("report-turn"), undefined);
+    noteTurnOpened("person-turn", true, []); assert.equal(actingFor("person-turn"), CONSOLE_OPERATOR);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 test("operator deny and ask still precede the task grant, while old RunOnHost always asks", async () => {
   const f = fixture();

@@ -4,15 +4,15 @@ import type { ToolContext, ToolOutcome } from "./tools.ts";
 import type { PolicyGate } from "./policy.ts";
 import type { DesktopHostTasks } from "./host-tasks.ts";
 import { HOST_TASK_CANCELLATION_NOTICE } from "./host-task-protocol.ts";
-import { personOpenedTurn } from "./person-turns.ts";
+import { actingFor, noteAskedFor } from "./person-turns.ts";
 
-/** The principal of a single-operator console, whose turns carry no signed-in identity. */
-export const CONSOLE_OPERATOR = "console-operator";
+export { CONSOLE_OPERATOR } from "./person-turns.ts";
 
 export const HOST_TASK_TOOL: Anthropic.Tool = {
   name: "HostTask",
   description: "Work on a project on the person's Mac with one task approval. First use list to see locally allowed projects. " +
     "Start names an exact project, purpose, and read/write access. The person approves a project COPY for up to two hours; network is disabled. " +
+    "After the approval, call start again with the same arguments to begin: run fails until then. " +
     "Results go to this server and model. Scope, secrets, Git metadata, symlinks and IPC are restricted by the Mac. " +
     "Use the returned taskId for multiple run commands (POSIX shell, no login profile). Commands are serial and max 5 minutes. " +
     "Edits remain in the returned local workspace; finish revokes access and retains it for review, without applying edits to the source. " +
@@ -31,9 +31,9 @@ export async function hostTaskTool(input: Record<string, unknown>, context: Tool
     const policy = context.policy, runner = context.hostRunner;
     if (!policy || !(runner instanceof DesktopHostRunner)) throw new Error("Host tasks require the authenticated desktop runner and policy gate");
     if (!context.conversation || context.conversation.startsWith("fork/")) throw new Error("Host tasks require a person's conversation; delegation is not supported");
-    // A signed-in caller is that person; otherwise only a turn a person opened (or its continuation) acts as the console's operator.
-    const principalId = context.caller?.userId ?? (personOpenedTurn(context.turnId) ? CONSOLE_OPERATOR : undefined);
-    if (!principalId) throw new Error("Host tasks run only in a turn a person opened; a teammate's, a schedule's or a webhook's wake cannot start or use one");
+    // A signed-in caller is that person; otherwise only a turn a person opened, or the wake their approval sent, acts for someone.
+    const principalId = context.caller?.userId ?? actingFor(context.turnId);
+    if (!principalId) throw new Error("Host tasks run only in a turn a person opened or in the wake of their approval; a teammate's, a schedule's or a webhook's wake cannot start or use one");
     const tasks = runner.tasks;
     let set = bound.get(policy); if (!set) { set = new Set(); bound.set(policy, set); }
     if (!set.has(tasks)) { policy.onStop(id => tasks.stopAgent(id)); set.add(tasks); }
@@ -50,7 +50,8 @@ export async function hostTaskTool(input: Record<string, unknown>, context: Tool
     const decision = policy.check({ ...base, input: approvedInput, ...(action === "start" ? {
       irreversible: "Authorize this Mac project task until its deadline", onceOnly: true as const,
     } : {}) });
-    if (!decision.allow) return { text: decision.reason, isError: true, ...(decision.approval ? { approval: { id: decision.approval.id } } : {}) };
+    if (!decision.allow && decision.approval && action === "start") noteAskedFor(decision.approval.id, principalId);
+    if (!decision.allow) return { text: decision.approval && action === "start" ? `${decision.reason}\nOnce the person allows it, call start again with the same root, purpose and access: that starts the task and returns its taskId.` : decision.reason, isError: true, ...(decision.approval ? { approval: { id: decision.approval.id } } : {}) };
     if (action === "list") return { text: JSON.stringify(tasks.capabilities ?? { unavailable: "Mac task execution is disconnected or unconfigured" }) };
     if (action === "status") return { text: JSON.stringify(tasks.status(task!)) };
     if (action === "run") policy.markHostRead(owner.agentId); // Persist before any private result can enter context.

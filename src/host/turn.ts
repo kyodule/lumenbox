@@ -17,7 +17,7 @@ import type { BoxClient } from "../box/client.ts";
 import type { Tracer } from "./trace.ts";
 import { GENAI_SEMCONV, genAiProviderName } from "./trace.ts";
 import type { DisplayLease } from "../box/display-lease.ts";
-import type { PolicyGate } from "./policy.ts"; import { notePersonTurn } from "./person-turns.ts";
+import type { PolicyGate } from "./policy.ts"; import { notePersonTurn, noteTurnOpened } from "./person-turns.ts";
 import type { Claims } from "./claims.ts";
 import type { FileVersions } from "./files.ts";
 import type { StepLedger, TurnLedger, ResumeMarker } from "./resume.ts";
@@ -1904,7 +1904,7 @@ ${outcome.text}`;
 
   // A person, as opposed to the harness wearing the person's shape: a timer, a webhook, a
   // resume and a first run all arrive as `fromId: "user"` because that is what opens a turn.
-  let personOpened = inbound.some(message => message.fromId === "user" && message.synthetic !== true); if (personOpened) notePersonTurn(turnId);
+  let personOpened = inbound.some(message => message.fromId === "user" && message.synthetic !== true); noteTurnOpened(turnId, personOpened, inbound);
   /**
    * Whether the person is a party to this conversation at all: they opened this turn, or they
    * have spoken here before. False for a worker that only ever hears from teammates.

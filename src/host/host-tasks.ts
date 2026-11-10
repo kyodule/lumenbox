@@ -90,6 +90,7 @@ export class DesktopHostTasks {
   }
   async run(task: HostTaskRecord, command: unknown): Promise<HostTaskResult> {
     this.live(task);
+    if (task.state === "proposed") throw new Error("Task not started: once the person has allowed it, call start again with the same root, purpose and access");
     if (task.state !== "active" || task.busy) throw new Error("Task is not active or another command is still running");
     if (typeof command !== "string" || !command.trim() || Buffer.byteLength(command) > 16_000) throw new Error("command must be nonempty and at most 16000 bytes");
     task.busy = true;
