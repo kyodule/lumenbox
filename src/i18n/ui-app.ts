@@ -178,6 +178,8 @@ export const UI_APP: Record<string, readonly [zh: string, en: string]> = {
   "ui.app.enabled-and-ready": ["已启用，可以使用。", "Enabled and ready."],
   "ui.app.enabled-but": ["已启用，但：", "Enabled, but:"],
   "ui.app.enter-an-answer-first": ["请先输入回答。", "Enter an answer first."],
+  "ui.app.event-stream-dropped-reconnecting": ["事件流断开了，正在重新连接", "event stream dropped — reconnecting"],
+  "ui.app.event-stream-reconnected": ["事件流已重新连接", "event stream reconnected"],
   "ui.app.every-run": ["（每次运行）", "(every run)"],
   "ui.app.evidence": ["证据：", "evidence:"],
   "ui.app.extensions-agentbox-extensions": ["扩展（~/.agentbox/extensions）：", "Extensions (~/.agentbox/extensions):"],
