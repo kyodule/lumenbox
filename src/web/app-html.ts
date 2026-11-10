@@ -6196,7 +6196,7 @@ function inView(e) {
   return e.agentId === current && (e.conversation || "main") === currentConversation;
 }
 
-stream.onmessage = function (raw) {
+function onStreamMessage(raw) {
   var e = JSON.parse(raw.data);
   var line = activityLine(e);
   if (line) feed(line.html, line.cls);
@@ -6378,11 +6378,13 @@ stream.onmessage = function (raw) {
     return;
   }
 
-};
+}
 
-stream.onerror = function () {
-  feed("event stream dropped &mdash; reload the page to reconnect", "err");
-};
+// A server restart closes the stream for good (EventSource does not retry an HTTP error); reopen it, and redraw the open chat from the transcript for what passed meanwhile.
+var streamDropped = false, streamRetryMs = 1000;
+function watchStream(source) { source.onmessage = onStreamMessage; source.onopen = function () { streamRetryMs = 1000; if (!streamDropped) return; streamDropped = false; feed("event stream reconnected", ""); if (current) select(current, currentConversation); };
+  source.onerror = function () { if (!streamDropped) feed("event stream dropped &mdash; reconnecting", "err"); streamDropped = true; if (source.readyState === EventSource.CLOSED) setTimeout(function () { stream = new EventSource("/api/events"); watchStream(stream); }, streamRetryMs = Math.min(streamRetryMs * 2, 30000)); }; }
+watchStream(stream);
 
 // --- input ----------------------------------------------------------------
 

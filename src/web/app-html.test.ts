@@ -187,6 +187,26 @@ test("long waiting lists scroll within Tasks instead of overlapping Activity", (
   assert.match(APP_HTML, /<div class="scroll" id="tasklist" title="[^"]+"><\/div>/); // titled since INV-1647: the board, under the waiting list
 });
 
+test("a stream the server closed is reopened, and the open chat is redrawn once it is back; the first open redraws nothing", () => {
+  const source = /var streamDropped = false[\s\S]*?\nwatchStream\(stream\);/.exec(APP_HTML)?.[0];
+  assert.ok(source, "the stream watcher is on the page");
+  const made: FakeSource[] = [], fed: string[] = [], redrawn: string[] = [], timers: (() => void)[] = [];
+  class FakeSource { static CLOSED = 2; readyState = 1; onmessage: unknown; onopen?: () => void; onerror?: () => void; constructor(readonly url: string) { made.push(this); } }
+  const first = new FakeSource("/api/events");
+  const run = new Function("stream", "EventSource", "feed", "select", "onStreamMessage", "setTimeout", "current", "currentConversation",
+    `${source}; return { stream: function () { return stream; } };`);
+  const page = run(first, FakeSource, (line: string) => fed.push(line), (id: string, conversation: string) => redrawn.push(`${id}/${conversation}`), () => {}, (fn: () => void) => timers.push(fn), "ada", "main") as { stream(): FakeSource };
+  first.onopen?.(); assert.deepEqual(redrawn, [], "the first open is not a reconnect");
+  first.readyState = 0; first.onerror?.(); // a dropped connection the browser retries by itself
+  assert.equal(timers.length, 0); first.onopen?.();
+  assert.deepEqual(redrawn, ["ada/main"], "what passed while it was down is read back from the transcript");
+  first.readyState = 2; first.onerror?.(); // the restart answered with an error: closed for good
+  assert.equal(timers.length, 1); timers[0]!();
+  const second = page.stream(); assert.notEqual(second, first); assert.equal(second.url, "/api/events");
+  second.onopen?.();
+  assert.deepEqual(redrawn, ["ada/main", "ada/main"]);
+  assert.ok(fed.some(line => /reconnecting/.test(line)) && fed.some(line => /reconnected/.test(line)));
+});
 test("the feed renders the plain-language phrase and falls back to the tool name (INV-783)", () => {
   // A browser cannot run here, so the page's activityLine is lifted out and run with the
   // helpers it reaches for stubbed: the contract is "phrase in the reader's language when
