@@ -17,6 +17,12 @@ import type { PendingApproval } from "./policy.ts";
 
 /** How long a pending approval may wait for a person before it expires. */
 export const APPROVAL_MAX_AGE_MS = 24 * 60 * 60_000;
+/**
+ * How long an approval whose turn has ended still waits for a person. A turn usually ends right after
+ * asking, so without this the card was gone in under a minute, before a person away from the window saw
+ * it; a late "allow" still works, because it wakes the agent to go ahead.
+ */
+export const ORPHAN_GRACE_MS = 30 * 60_000;
 
 /** The ledgers' reads this module needs: the turns still open (forks included), and the steps each is parked on. */
 export interface OpenTurns {
@@ -74,7 +80,7 @@ export function staleApprovals(turns: OpenTurns | undefined, pending: readonly P
   for (const approval of pending) {
     const age = now - Date.parse(approval.requestedAt);
     if (age > maxAgeMs) stale.push({ id: approval.id, agentName: approval.agentName, reason: `waited ${Math.round(age / 3_600_000)} hours for an answer; the limit is ${Math.round(maxAgeMs / 3_600_000)}` });
-    else if (turns !== undefined && !waitedOn.has(approval.id) && !(approval.harnessResumes === true) && !(approval.outlivesTurn === true)) stale.push({ id: approval.id, agentName: approval.agentName, reason: "the turn that asked has ended; nothing waits on this answer" });
+    else if (turns !== undefined && !waitedOn.has(approval.id) && !(approval.harnessResumes === true) && !(approval.outlivesTurn === true) && age > ORPHAN_GRACE_MS) stale.push({ id: approval.id, agentName: approval.agentName, reason: `the turn that asked has ended and nobody answered in ${Math.round(ORPHAN_GRACE_MS / 60_000)} minutes` });
   }
   return stale;
 }
