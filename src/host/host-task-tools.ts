@@ -12,7 +12,7 @@ export const HOST_TASK_TOOL: Anthropic.Tool = {
   name: "HostTask",
   description: "Work on a project on the person's Mac with one task approval. First use list to see locally allowed projects. " +
     "Start names an exact project, purpose, and read/write access. The person approves a project COPY for up to two hours; network is disabled. " +
-    "After the approval, call start again with the same arguments to begin: run fails until then. " +
+    "Start returns a taskId and waits for the person. Once they allow it, in that wake or any later turn before its deadline, call start with that taskId to begin; run fails until then. " +
     "Results go to this server and model. Scope, secrets, Git metadata, symlinks and IPC are restricted by the Mac. " +
     "Use the returned taskId for multiple run commands (POSIX shell, no login profile). Commands are serial and max 5 minutes. " +
     "Edits remain in the returned local workspace; finish revokes access and retains it for review, without applying edits to the source. " +
@@ -42,7 +42,8 @@ export async function hostTaskTool(input: Record<string, unknown>, context: Tool
       principalName: context.callerName, turnId: context.turnId, tool: "HostTask" };
     const action = input.action;
     if (!["list", "start", "run", "status", "finish", "cancel"].includes(String(action))) throw new Error("Unknown HostTask action");
-    const task = action === "list" ? undefined : action === "start" ? tasks.propose(owner, input) : tasks.get(owner, input.taskId);
+    const task = action === "list" ? undefined : action === "start" && input.taskId === undefined ? tasks.propose(owner, input) : tasks.get(owner, input.taskId);
+    if (action === "start" && task!.state !== "proposed") throw new Error(`Task ${task!.grant.taskId} is ${task!.state}; its authorization is used. Use run, status or finish, or start a new task without a taskId`);
     // The nonce, identity, ceiling and deadline are trusted facts. No model-supplied grant is accepted.
     const approvedInput: Record<string, unknown> = action === "start" ? { action, ...task!.grant,
       editing: "isolated project copy; source unchanged; excluded credentials, Git metadata and links", data: "results to your server and configured model",
@@ -51,7 +52,7 @@ export async function hostTaskTool(input: Record<string, unknown>, context: Tool
       irreversible: "Authorize this Mac project task until its deadline", onceOnly: true as const,
     } : {}) });
     if (!decision.allow && decision.approval && action === "start") noteAskedFor(decision.approval.id, principalId);
-    if (!decision.allow) return { text: decision.approval && action === "start" ? `${decision.reason}\nOnce the person allows it, call start again with the same root, purpose and access: that starts the task and returns its taskId.` : decision.reason, isError: true, ...(decision.approval ? { approval: { id: decision.approval.id } } : {}) };
+    if (!decision.allow) return { text: decision.approval && action === "start" ? `${decision.reason}\ntaskId ${task!.grant.taskId}. Once the person allows it, call start with {"action":"start","taskId":"${task!.grant.taskId}"} to begin; the approval waits until ${new Date(task!.grant.expiresAt).toISOString()}.` : decision.reason, isError: true, ...(decision.approval ? { approval: { id: decision.approval.id } } : {}) };
     if (action === "list") return { text: JSON.stringify(tasks.capabilities ?? { unavailable: "Mac task execution is disconnected or unconfigured" }) };
     if (action === "status") return { text: JSON.stringify(tasks.status(task!)) };
     if (action === "run") policy.markHostRead(owner.agentId); // Persist before any private result can enter context.

@@ -143,6 +143,7 @@ export interface PendingApproval {
   harnessResumes?: boolean;
   /** Only "once" may be granted (INV-1309): a tainted turn's outbound call is never a standing grant. */
   onceOnly?: true; why?: string; taskLevel?: 1 | 2 | 3 | 4 | 5; // why: the agent's one-line case for the step, as its claim (INV-1651); taskLevel: the task it serves (INV-1650) — the card's background
+  outlivesTurn?: true; // A trusted task request: answered on its own deadline, not expired when the asking turn ends.
 }
 
 // ── limits ────────────────────────────────────────────────────────────────────────────
@@ -231,7 +232,7 @@ type PolicyEvent =
   | { at: string; kind: "reply-refused"; purpose: string; chatKey: string; reason: string } // A host push whose purpose's claim did not hold (INV-1459).
   | { at: string; kind: "observed"; slug: string; would: string } // A routine in observe mode was triggered and did not run (INV-1458).
   | { at: string; kind: "resume"; agentId: string; by: string }
-  | { at: string; kind: "approval-requested"; id: string; fingerprint: string; agentId: string; description: string; action?: string; harnessResumes?: boolean; why?: string; taskLevel?: 1 | 2 | 3 | 4 | 5; onceOnly?: true } // why/taskLevel: the card's background survives a restart (INV-1651)
+  | { at: string; kind: "approval-requested"; id: string; fingerprint: string; agentId: string; description: string; action?: string; harnessResumes?: boolean; why?: string; taskLevel?: 1 | 2 | 3 | 4 | 5; onceOnly?: true; outlivesTurn?: true } // why/taskLevel: the card's background survives a restart (INV-1651)
   | { at: string; kind: "approval-granted"; id: string; by: string }
   | { at: string; kind: "approval-granted-session"; id: string; by: string }
   | {
@@ -738,7 +739,7 @@ export class PolicyGate {
       description,
       ...(effect.action !== undefined ? { action: effect.action } : {}),
       requestedAt: this.now().toISOString(), ...(request.why !== undefined ? { why: request.why } : {}), ...(request.taskLevel !== undefined ? { taskLevel: request.taskLevel } : {}),
-      ...(this.lastTaint !== undefined || request.onceOnly === true ? { onceOnly: true as const } : {}),
+      ...(this.lastTaint !== undefined || request.onceOnly === true ? { onceOnly: true as const } : {}), ...(request.onceOnly === true ? { outlivesTurn: true as const } : {}),
     };
     this.awaiting.set(fingerprint, approval);
     this.log(`waiting for a person to approve: ${description}`);
@@ -757,7 +758,7 @@ export class PolicyGate {
         agentId: approval.agentId,
         description,
         ...(approval.action !== undefined ? { action: approval.action } : {}), ...(approval.why !== undefined ? { why: approval.why } : {}), ...(approval.taskLevel !== undefined ? { taskLevel: approval.taskLevel } : {}),
-        ...(approval.onceOnly === true ? { onceOnly: true as const } : {}),
+        ...(approval.onceOnly === true ? { onceOnly: true as const } : {}), ...(approval.outlivesTurn === true ? { outlivesTurn: true as const } : {}),
       },
     };
   }
@@ -1035,7 +1036,7 @@ export class PolicyGate {
             agentId: event.agentId,
             agentName: "",
             description: event.description,
-            ...(event.onceOnly === true ? { onceOnly: true as const } : {}),
+            ...(event.onceOnly === true ? { onceOnly: true as const } : {}), ...(event.outlivesTurn === true ? { outlivesTurn: true as const } : {}),
             ...(event.action !== undefined ? { action: event.action } : {}), ...(event.why !== undefined ? { why: event.why } : {}), ...(event.taskLevel !== undefined ? { taskLevel: event.taskLevel } : {}),
             ...(event.harnessResumes === true ? { harnessResumes: true } : {}),
             requestedAt: event.at,

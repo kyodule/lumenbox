@@ -74,7 +74,7 @@ export function staleApprovals(turns: OpenTurns | undefined, pending: readonly P
   for (const approval of pending) {
     const age = now - Date.parse(approval.requestedAt);
     if (age > maxAgeMs) stale.push({ id: approval.id, agentName: approval.agentName, reason: `waited ${Math.round(age / 3_600_000)} hours for an answer; the limit is ${Math.round(maxAgeMs / 3_600_000)}` });
-    else if (turns !== undefined && !waitedOn.has(approval.id) && !(approval.harnessResumes === true)) stale.push({ id: approval.id, agentName: approval.agentName, reason: "the turn that asked has ended; nothing waits on this answer" });
+    else if (turns !== undefined && !waitedOn.has(approval.id) && !(approval.harnessResumes === true) && !(approval.outlivesTurn === true)) stale.push({ id: approval.id, agentName: approval.agentName, reason: "the turn that asked has ended; nothing waits on this answer" });
   }
   return stale;
 }

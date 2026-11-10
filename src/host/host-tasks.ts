@@ -90,7 +90,7 @@ export class DesktopHostTasks {
   }
   async run(task: HostTaskRecord, command: unknown): Promise<HostTaskResult> {
     this.live(task);
-    if (task.state === "proposed") throw new Error("Task not started: once the person has allowed it, call start again with the same root, purpose and access");
+    if (task.state === "proposed") throw new Error(`Task not started: once the person has allowed it, call start with taskId ${task.grant.taskId}`);
     if (task.state !== "active" || task.busy) throw new Error("Task is not active or another command is still running");
     if (typeof command !== "string" || !command.trim() || Buffer.byteLength(command) > 16_000) throw new Error("command must be nonempty and at most 16000 bytes");
     task.busy = true;
@@ -107,6 +107,8 @@ export class DesktopHostTasks {
   status(task: HostTaskRecord): Record<string, unknown> {
     const active = task.state === "active" && task.sessionId === this.seat?.id && task.grant.expiresAt > this.now();
     const lastCleanup = [...task.jobs].reverse().find(job => (job.action === "cancel" || job.action === "finish") && job.result?.cleanup)?.result?.cleanup;
+    // A proposal not yet started was never in force: not "revoked", and nothing ran to clean up. Start it by taskId once allowed.
+    if (task.state === "proposed" && task.sessionId === this.seat?.id && task.grant.expiresAt > this.now()) return { grant: task.grant, state: "proposed", authorization: "not-started", jobs: task.jobs };
     return { grant: task.grant, state: !active && task.state === "active" ? "unknown" : task.state, authorization: active ? "active" : "revoked",
       workspace: task.workspace, jobs: task.jobs, ...(!active ? { cleanup: lastCleanup ?? unconfirmedCleanup(), notice: HOST_TASK_STOP_NOTICE } : {}) };
   }

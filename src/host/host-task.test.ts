@@ -8,6 +8,7 @@ import { DesktopHostRunner } from "./host-runner.ts";
 import { DesktopHostTasks } from "./host-tasks.ts";
 import { PolicyGate, DEFAULT_LIMITS } from "./policy.ts";
 import { RuleStore } from "./rules.ts";
+import { staleApprovals } from "./approval-wait.ts";
 import { buildTools, dispatchTool, type ToolContext } from "./tools.ts";
 import { CONSOLE_OPERATOR } from "./host-task-tools.ts";
 import { actingFor, noteApprovalWake, noteAskedFor, notePersonTurn, noteTurnOpened } from "./person-turns.ts";
@@ -99,7 +100,7 @@ test("a console with no signed-in identity: the person's turn asks, the wake of 
     assert.match((await dispatchTool("HostTask", { action: "list" }, teammateWake)).text, /turn a person opened/);
     notePersonTurn("console-turn");
     const question = await dispatchTool("HostTask", proposal, consoleTurn);
-    assert.ok(question.approval, question.text); assert.match(question.text, /call start again/);
+    assert.ok(question.approval, question.text); assert.match(question.text, /call start with \{"action":"start","taskId":"[0-9a-f-]{36}"\}/);
     f.policy.grant(question.approval.id, "person", "once");
     assert.ok((await dispatchTool("HostTask", proposal, approvalWake)).isError, "a wake that names no approval acts for nobody");
     noteApprovalWake("approval-wake", "an-approval-nobody-asked-for");
@@ -138,6 +139,33 @@ test("the approval's wake carries its id through the bus, and only that wake act
     noteTurnOpened("report-turn", false, seen.slice(1)); assert.equal(actingFor("report-turn"), undefined);
     noteTurnOpened("person-turn", true, []); assert.equal(actingFor("person-turn"), CONSOLE_OPERATOR);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("the 升级验收2 timeline: the card outlives the asking turn, a wake that does nothing loses nothing, and start by taskId 14 minutes later begins the task", async () => {
+  let now = Date.now();
+  const dir = mkdtempSync(join(tmpdir(), "host-task-timeline-"));
+  const rulesPath = join(dir, "rules"); mkdirSync(rulesPath);
+  const policy = new PolicyGate({ path: join(dir, "policy.jsonl"), rules: new RuleStore(rulesPath), now: () => new Date(now), limits: { ...DEFAULT_LIMITS, approvalRequiredTools: [], approvalRequiredCommands: [], tierGate: "enforce" } });
+  const runner = new DesktopHostRunner(); Object.defineProperty(runner, "tasks", { value: new DesktopHostTasks(() => now) }); const seat = connection(runner.tasks);
+  const base = { agent: { id: owner.agentId, profile: { name: "Ada" } }, caller: undefined, conversation: "main", policy, hostRunner: runner, registry: {}, bus: {} };
+  try {
+    notePersonTurn("asked"); // 07:22: the person's turn asks, and ends
+    const asked = await dispatchTool("HostTask", proposal, { ...base, turnId: "asked" } as unknown as ToolContext);
+    assert.ok(asked.approval, asked.text);
+    const taskId = /taskId ([0-9a-f-]{36})/.exec(asked.text)?.[1]; assert.ok(taskId, asked.text);
+    const ended = { turns: { interrupted: () => [] }, steps: { stepsOf: () => ({ open: [] }) } };
+    assert.deepEqual(staleApprovals(ended, policy.pending(), now.valueOf()), [], "the asking turn has ended; the task card still waits");
+    now += 3 * 60_000; policy.grant(asked.approval.id, "user", "once"); // 07:25: allowed; the wake makes no HostTask call
+    now += 11 * 60_000; notePersonTurn("next"); // 07:37: the person's next turn, past the 10-minute proposal window
+    const next = { ...base, turnId: "next" } as unknown as ToolContext;
+    assert.equal(JSON.parse((await dispatchTool("HostTask", { action: "status", taskId }, next)).text).authorization, "not-started");
+    const start = await dispatchTool("HostTask", { action: "start", taskId }, next);
+    assert.ok(!start.isError, start.text); assert.equal(JSON.parse(start.text).taskId, taskId);
+    assert.equal(policy.pending().length, 0, "no second card");
+    assert.ok(!(await dispatchTool("HostTask", { action: "run", taskId, command: "pwd" }, next)).isError);
+    const again = await dispatchTool("HostTask", { action: "start", taskId }, next);
+    assert.ok(again.isError && !again.approval, "a used authorization is not asked for again");
+    assert.equal(seat.frames.filter(frame => frame.action === "start").length, 1);
+  } finally { runner.tasks.disconnect(); rmSync(dir, { recursive: true, force: true }); }
 });
 test("operator deny and ask still precede the task grant, while old RunOnHost always asks", async () => {
   const f = fixture();
