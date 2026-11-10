@@ -331,7 +331,7 @@ function notify(title, body, options = {}) {
 let lastAgents = [];
 const notificationsSent = new Map();
 function readAgentFacts() {
-  http.get(`${PAGE}api/state`, { headers: uiAuth.headers }, response => {
+  pageClient.get(`${PAGE}api/state`, { headers: uiAuth.headers }, response => {
     let body = "";
     response.on("data", chunk => { body += String(chunk); });
     response.on("end", () => {
