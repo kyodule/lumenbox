@@ -9,6 +9,8 @@ import { DesktopHostTasks } from "./host-tasks.ts";
 import { PolicyGate, DEFAULT_LIMITS } from "./policy.ts";
 import { RuleStore } from "./rules.ts";
 import { buildTools, dispatchTool, type ToolContext } from "./tools.ts";
+import { CONSOLE_OPERATOR } from "./host-task-tools.ts";
+import { notePersonTurn } from "./person-turns.ts";
 import { type HostTaskJob, type HostTaskAnswer, type HostTaskCapabilities, HOST_TASK_CANCELLATION, HOST_TASK_TTL_MS } from "./host-task-protocol.ts";
 import { snapshotProject, clipOutput, loadTaskPolicy, createLocalTask, CodexCommand, CODEX_TASK_VERSION } from "../../electron/host-task-runtime.ts";
 
@@ -86,6 +88,26 @@ test("owner, root, device, connection and task limits cannot be widened by model
   } finally { f.cleanup(); }
 });
 
+test("a console with no signed-in identity: the person's turn and its continuation are the operator's, a teammate's wake is refused", async () => {
+  const f = fixture();
+  try {
+    const consoleTurn = { ...f.context, caller: undefined, turnId: "console-turn" } as ToolContext;
+    const teammateWake = { ...f.context, caller: undefined, turnId: "teammate-wake" } as ToolContext;
+    assert.match((await dispatchTool("HostTask", { action: "list" }, teammateWake)).text, /turn a person opened/);
+    notePersonTurn("console-turn");
+    const question = await dispatchTool("HostTask", proposal, consoleTurn);
+    assert.ok(question.approval, question.text);
+    f.policy.grant(question.approval.id, "person", "once");
+    const start = await dispatchTool("HostTask", proposal, consoleTurn); // the continuation keeps the turn id
+    assert.ok(!start.isError, start.text);
+    assert.equal(f.seat.frames[0]?.grant.principalId, CONSOLE_OPERATOR);
+    const taskId = JSON.parse(start.text).taskId as string;
+    assert.ok(!(await dispatchTool("HostTask", { action: "run", taskId, command: "pwd" }, consoleTurn)).isError);
+    for (const other of [teammateWake, { ...consoleTurn, conversation: "fork/child" } as ToolContext, { ...consoleTurn, caller: { userId: "person" } } as ToolContext]) {
+      assert.ok((await dispatchTool("HostTask", { action: "run", taskId, command: "pwd" }, other)).isError);
+    }
+  } finally { f.cleanup(); }
+});
 test("operator deny and ask still precede the task grant, while old RunOnHost always asks", async () => {
   const f = fixture();
   try {
