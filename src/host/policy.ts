@@ -106,6 +106,8 @@ export type PolicyRequest =
       irreversible?: string; taskLevel?: 1 | 2 | 3 | 4 | 5; why?: string; // why (INV-1651): the agent's one-line case, shown as its claim, never in the fingerprint; taskLevel (INV-1650): the level of the task this call serves; outward calls ask below L5 and are refused below L3; set by dispatch from the board
       /** The agent lives on the person's own machine (INV-438): a write there asks unless an operator's allow rule lifts it (INV-1700). Set by dispatch, never by the model. */
       onHostBox?: true;
+      /** LUMENBOX-FORK: the person's own Mac runs it and asks there, so no server card is raised for RunOnHost. Set by dispatch, never by the model. */
+      onMacRunner?: true;
       /** The turn this call belongs to, for the taint rule (INV-1309): set by dispatch, never by the model. */
       turnId?: string;
       /** The model's tool_use id this check is for (INV-1664): ties the verdict to the step the chat draws. Set by dispatch. */
@@ -641,13 +643,17 @@ export class PolicyGate {
     const tierWouldAsk = gate !== "off" && tierAsks(tier); const byLevel = request.taskLevel !== undefined ? levelAllows(request.taskLevel, tier) : "allow"; /* the task's own level (INV-1650): a refusal says where the task stops; an ask joins the card below */ if (byLevel === "deny") return { decision: { allow: false, reason: `This task is at L${request.taskLevel}: it stops before acting on the world — hand back what you have (a summary at L1, a plan at L2) and say what the next step would be.` } };
     const hostBoxAsk = request.onHostBox === true ? hostBoxWrite(request.tool, request.input) : undefined;
     const configuredAsk = this.needsApproval(request) || (gate === "enforce" && tierWouldAsk) || byLevel === "ask" || hostBoxAsk !== undefined;
-    const mustAsk = request.tool === "RunOnHost" || request.irreversible !== undefined || this.lastTaint !== undefined;
-    const asks = rule?.effect === "ask" || mustAsk || (configuredAsk && rule?.effect !== "allow");
-    this.lastAsks = askReasons({ ...(rule !== undefined ? { rule } : {}), hostCommand: request.tool === "RunOnHost", ...(request.irreversible !== undefined ? { irreversible: request.irreversible } : {}), tainted: this.lastTaint !== undefined,
-      approvalList: this.needsApproval({ ...request, irreversible: undefined }) && request.tool !== "RunOnHost", ...(gate === "enforce" && tierWouldAsk ? { tierEnforced: tier } : {}), ...(byLevel === "ask" && request.taskLevel !== undefined ? { levelAsks: request.taskLevel } : {}), ...(hostBoxAsk !== undefined ? { hostBoxWrite: hostBoxAsk } : {}) });
+    // LUMENBOX-FORK: with the Mac runner the Mac's own dialog is the single approval point, so
+    // RunOnHost raises no server card here — not from an `ask` rule or a configured gate either. A deny rule (above) and a tainted turn still ask.
+    const macRun = request.tool === "RunOnHost" && request.onMacRunner === true;
+    const mustAsk = (request.tool === "RunOnHost" && !macRun) || request.irreversible !== undefined || this.lastTaint !== undefined;
+    const asks = macRun ? this.lastTaint !== undefined || request.irreversible !== undefined : rule?.effect === "ask" || mustAsk || (configuredAsk && rule?.effect !== "allow");
+    const told = macRun ? undefined : rule;
+    this.lastAsks = askReasons({ ...(told !== undefined ? { rule: told } : {}), hostCommand: request.tool === "RunOnHost" && !macRun, ...(request.irreversible !== undefined ? { irreversible: request.irreversible } : {}), tainted: this.lastTaint !== undefined,
+      approvalList: !macRun && this.needsApproval({ ...request, irreversible: undefined }) && request.tool !== "RunOnHost", ...(gate === "enforce" && tierWouldAsk && !macRun ? { tierEnforced: tier } : {}), ...(byLevel === "ask" && request.taskLevel !== undefined && !macRun ? { levelAsks: request.taskLevel } : {}), ...(hostBoxAsk !== undefined ? { hostBoxWrite: hostBoxAsk } : {}) });
     if (!asks) {
       // Shadow: allowed as before, and the row says a person would have been asked.
-      this.lastWouldAsk = gate === "shadow" && tierWouldAsk && rule?.effect !== "allow";
+      this.lastWouldAsk = !macRun && gate === "shadow" && tierWouldAsk && rule?.effect !== "allow";
       return { decision: { allow: true } };
     }
     if (request.delegated !== undefined && request.delegated.ask !== true) {
@@ -818,7 +824,9 @@ export class PolicyGate {
     // Host execution always asks, by construction rather than by configuration: it is
     // the one tool that runs outside the box, and an operator turning it off is done
     // by not enabling it at all, not by trusting an empty approval list.
-    if (request.tool === "RunOnHost") return true;
+    // LUMENBOX-FORK: when the Mac runner is the executor, the Mac's dialog is the authorisation
+    // point (it runs read-only commands and remembered prefixes without asking).
+    if (request.tool === "RunOnHost") return request.onMacRunner !== true;
     // The box saw a payment, a publish, a delete, an authorisation. Not configurable off:
     // the operator's lists say which tools always ask; this says this call must.
     if (request.irreversible !== undefined) return true;

@@ -80,7 +80,7 @@ function guarded(name: string, args: readonly string[]): string | undefined {
 const NEVER = /(^|[\s;&|(])(sudo|doas|su|eval|exec|xargs|source|sh|bash|zsh|dash|ksh|fish|env|nohup|timeout|watch|nice|ionice|command|builtin|time|script|tee|dd|rm|mv|cp|chmod|chown|chgrp|ln|mkdir|rmdir|touch|truncate|shred|kill|pkill|killall|curl|wget|ssh|scp|rsync|ftp|sftp|nc|ncat|telnet|apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo|go|make|tar|zip|unzip|gzip|gunzip|crontab|mkfs|fdisk|mount|umount|reboot|shutdown|halt|poweroff|passwd|useradd|userdel|usermod|iptables|nft|ufw)(\s|$)/;
 
 /** Splits on |, ||, &&, ;, and newlines — outside quotes. Null when the quoting is unbalanced. */
-function segments(command: string): string[] | null {
+export function segments(command: string): string[] | null {
   const parts: string[] = [];
   let current = "";
   let quote: '"' | "'" | undefined;
@@ -118,7 +118,7 @@ function segments(command: string): string[] | null {
 }
 
 /** The words of one segment, quotes stripped, or null when it cannot be read as plain words. */
-function words(segment: string): string[] | null {
+export function words(segment: string): string[] | null {
   const out: string[] = [];
   const pattern = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
   for (const match of segment.matchAll(pattern)) {

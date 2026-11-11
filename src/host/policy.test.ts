@@ -917,6 +917,34 @@ test("ask forces an approval with the rule on the card; allow lifts the operator
   }
 });
 
+test("a host command on the Mac runner raises no card here: the Mac's own dialog is the authorisation point (LUMENBOX-FORK)", () => {
+  const { cleanup, path } = fixture();
+  try {
+    const dir = join(path, "..", "rules");
+    const rules = rulesIn(dir, {
+      "no-wipe": "---\neffect: deny\ntool: RunOnHost\ncommand: rm -rf /\n---\nNever wipe this Mac.\n",
+      "ask-tests": "---\neffect: ask\ntool: RunOnHost\ncommand: npm test\n---\nTests are a person's call.\n",
+    });
+    const gate = new PolicyGate({ path, limits: { budgetWindowHours: 24, wakesPerWindow: 30, wakeWindowMinutes: 10, approvalRequiredTools: [], approvalRequiredCommands: [] }, rules });
+    const onMac = (command: string): PolicyRequest => ({ kind: "tool", agentId: "agent-1", agentName: "Ada", tool: "RunOnHost", input: { command }, onMacRunner: true });
+
+    assert.equal(gate.check(onMac("npm test")).allow, true, "the Mac asks, so no card here");
+    assert.equal(gate.pending().length, 0, "nothing was put in front of the server's person");
+    assert.equal(gate.check(onMac("npm test -- --watch=false")).allow, true, "an ask rule does not lift the Mac's own dialog into a second card");
+
+    // Deny still refuses, and names the rule: the Mac dialog never gets the command.
+    const denied = gate.check(onMac("rm -rf / --no-preserve-root"));
+    assert.equal(denied.allow, false);
+    assert.match(!denied.allow ? denied.reason : "", /^Refused by rule no-wipe:/);
+
+    // Without the Mac flag the host rule still stands (the non-Mac case above).
+    const server = gate.check({ kind: "tool", agentId: "agent-1", agentName: "Ada", tool: "RunOnHost", input: { command: "jira comment X-1 'done'" } });
+    assert.equal(server.allow, false);
+  } finally {
+    cleanup();
+  }
+});
+
 test("the taint rule (INV-1309): a turn that read a vault secret is asked before reaching a host outside the allow list, once only", () => {
   const { path, cleanup } = fixture();
   try {

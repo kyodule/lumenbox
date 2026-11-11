@@ -1,0 +1,106 @@
+/**
+ * Tests for the Mac's own approval decision (LUMENBOX-FORK).
+ *
+ * The claim worth testing is not "read-only commands run" — it is that an allowed prefix is never
+ * a pass for a part it does not cover. Every case below about `&&` exists because Claude Code
+ * shipped that bug more than once (issues #4956, #16180, #28784, #36637): a person allowed
+ * `npm test` and a later line carried `rm -rf build` under it.
+ */
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  commandPrefix,
+  decideApproval,
+  type MacAllowEntry,
+  readOnly,
+  shellParts,
+} from "./mac-approval.ts";
+
+const allow = (...prefixes: string[]): MacAllowEntry[] =>
+  prefixes.map(prefix => ({ prefix: prefix.split(" "), at: "2026-11-11T00:00:00.000Z" }));
+
+const ask = { mode: "ask" as const };
+
+test("read-only commands run without a dialog: ls -la, git status, cat x", () => {
+  for (const command of ["ls -la", "git status", "cat x", "rg TODO src", "pwd", "git log --oneline -5"]) {
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "auto", `${command} should run unasked`);
+  }
+});
+
+test("a chain of read-only parts runs without a dialog: ls && cat x", () => {
+  const decision = decideApproval("ls && cat x", { ...ask, allow: [] });
+  assert.equal(decision.kind, "auto");
+});
+
+test("npm test && rm -rf build always asks: the second part decides it", () => {
+  const fresh = decideApproval("npm test && rm -rf build", { ...ask, allow: [] });
+  assert.equal(fresh.kind, "ask");
+  assert.equal(fresh.kind === "ask" ? fresh.prefix : "", "npm test", "the first part it does not cover is the one offered");
+
+  // Acceptance 3: with `npm test` remembered, the dialog is about the part it does NOT cover.
+  const carried = decideApproval("npm test && rm -rf build", { ...ask, allow: allow("npm test") });
+  assert.equal(carried.kind, "ask", "the allowed prefix must not carry the second command");
+  assert.equal(carried.kind === "ask" ? carried.prefix : "", "rm -rf");
+  assert.equal(carried.kind === "ask" ? carried.remember : "", "一直允许 rm -rf");
+});
+
+test("an allowed prefix does not carry the next part: npm test && npm run lint still asks", () => {
+  const decision = decideApproval("npm test && npm run lint", { ...ask, allow: allow("npm test") });
+  assert.equal(decision.kind, "ask", "npm run lint was never allowed");
+  assert.equal(decision.kind === "ask" ? decision.prefix : "", "npm run");
+});
+
+test("a line whose words are not the command offers only one run", () => {
+  for (const command of ["echo $(whoami)", "ls > /tmp/x", "FOO=1 ls", "cat < /tmp/x", "echo `whoami`"]) {
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "ask", `${command} should ask`);
+    assert.equal(decision.kind === "ask" ? decision.remember : "x", undefined, `${command} must not offer "always allow"`);
+  }
+  // Unbalanced quoting cannot be split at all.
+  assert.equal(shellParts('echo "unclosed'), null);
+  assert.equal(decideApproval("echo 'unclosed", { ...ask, allow: [] }).kind, "ask");
+});
+
+test("an allowed single command runs unasked", () => {
+  assert.equal(decideApproval("npm test", { ...ask, allow: allow("npm test") }).kind, "auto");
+  assert.equal(decideApproval("npm test -- --watch=false", { ...ask, allow: allow("npm test") }).kind, "auto");
+  assert.equal(decideApproval("npm tests", { ...ask, allow: allow("npm test") }).kind, "ask", "a longer word is a different command");
+});
+
+test("full access runs everything, and off refuses everything", () => {
+  for (const command of ["npm test && rm -rf build", "echo $(whoami)", "ls"]) {
+    assert.equal(decideApproval(command, { mode: "always", allow: [] }).kind, "auto");
+  }
+  const off = decideApproval("ls", { mode: "off", allow: [] });
+  assert.equal(off.kind, "refuse");
+  assert.match(off.kind === "refuse" ? off.because : "", /off/);
+});
+
+test("reading ~/.ssh is read-only, because the design takes that risk rather than inventing a directory list", () => {
+  assert.equal(readOnly("cat ~/.ssh/id_rsa"), true);
+  assert.equal(decideApproval("cat ~/.ssh/id_rsa", { ...ask, allow: [] }).kind, "auto");
+  // `$HOME` is a plain word to the shell, not a substitution: it names a path, so it reads too.
+  assert.equal(readOnly("cat $HOME/.zshrc"), true);
+  assert.equal(decideApproval("cat $HOME/.zshrc", { ...ask, allow: [] }).kind, "auto");
+});
+
+test("the remembered prefix is the first two words, and is what the dialog offers", () => {
+  assert.deepEqual(commandPrefix("npm test -- --watch"), { words: ["npm", "test"], text: "npm test" });
+  assert.deepEqual(commandPrefix("ls"), { words: ["ls"], text: "ls" });
+  const decision = decideApproval("git commit -m x", { ...ask, allow: [] });
+  assert.equal(decision.kind, "ask");
+  assert.equal(decision.kind === "ask" ? decision.remember : "", "一直允许 git commit");
+});
+
+test("the parts are upstream's split, so the read-only judgement and this one see the same segments", () => {
+  assert.deepEqual(shellParts("npm test && npm run lint"), ["npm test", "npm run lint"]);
+  assert.deepEqual(shellParts("a | b ; c"), ["a", "b", "c"]);
+  assert.deepEqual(shellParts("echo 'a && b'"), ["echo 'a && b'"], "a quoted operator is not a split");
+});
+
+test("every part is either read-only or allowed: ls && npm test runs once npm test is allowed", () => {
+  assert.equal(decideApproval("ls && npm test", { ...ask, allow: allow("npm test") }).kind, "auto");
+  assert.equal(decideApproval("ls && npm test", { ...ask, allow: [] }).kind, "ask");
+});

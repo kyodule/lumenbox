@@ -223,12 +223,13 @@ export const DESKTOP_RUN_ON_HOST =
   "Run a command on the person's Mac, through the LumenBox app on it. You run on a server; " +
   "this tool is the only way to reach that Mac, and it exists only while the app is open there " +
   "with Mac execution switched on. If a call says the Mac is not connected, tell the person; do " +
-  "not retry in a loop. Commands run through the person's login shell under a working directory " +
-  "they chose on the Mac. Writes are allowed only there and in the temp directory, never into " +
-  "~/.ssh, shell startup files or .git/hooks; network follows the person's setting. Every call " +
-  "stops for the person to approve the exact command, here and possibly again on the Mac, so write " +
-  "the command you mean and say in your message why you need it. Returns stdout, stderr and the " +
-  "exit code, the same as `bash`. `secrets` is not supported here: credentials stay on the server.";
+  "not retry in a loop. Commands run through the person's own login shell on the Mac, as them, " +
+  "in their home directory: there is no sandbox and no directory limit, so a command can reach " +
+  "anything they can. Read-only commands (ls, cat, git status) run at once; anything else stops " +
+  "for them to approve in a dialog on the Mac, where they may also allow that command's first " +
+  "words from then on, or refuse. Write the command you mean and say in your message why you " +
+  "need it. Returns stdout, stderr and the exit code, the same as `bash`. `secrets` is not " +
+  "supported here: credentials stay on the server.";
 
 /** The answer when RunOnHost names vault secrets in desktop mode, given before any is resolved. */
 export const DESKTOP_SECRETS_REFUSAL =
