@@ -132,8 +132,12 @@ function allowed(entry: readonly MacAllowEntry[], prefix: readonly string[]): Ma
  */
 const NEVER_REMEMBER = new Set(["sudo", "doas", "su", "env", "xargs", "nohup", "time", "timeout", "nice", "eval", "exec", "command", "builtin", "rm"]);
 
-/** Programs that run whatever they are handed, so only a prefix naming the script may be remembered. */
-const INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "deno", "bun", "perl", "ruby", "php", "lua", "osascript"]);
+/**
+ * Programs that run whatever they are handed, so only a prefix naming the script may be remembered.
+ * sed and awk are here for the same reason: `sed -f x` and `awk -f x` run a file's program, and
+ * `sed -i` writes any path it is given.
+ */
+const INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "deno", "bun", "perl", "ruby", "php", "lua", "osascript", "sed", "awk", "gawk"]);
 
 /**
  * Whether "always allow <these words>" may be offered. A prefix that already writes is enough

@@ -117,9 +117,10 @@ test("a prefix that still reads as read-only gets one run and no standing grant:
   }
 });
 
-test("a prefix whose own words already write can be remembered: sed -i, sort -o, git push, npm test", () => {
+test("a prefix whose own words already write can be remembered: sort -o, git push, npm test", () => {
   const cases: [string, string][] = [
-    ["sed -i s/a/b/ f", "sed -i"],
+    // sed/awk are interpreters here too: `sed -i` and `sed -f` write or run whatever they are
+    // pointed at, so those get one run (see the case list above).
     ["sort -o out in", "sort -o"],
     ["git push origin main", "git push"],
     ["npm test", "npm test"],
@@ -199,6 +200,14 @@ test("a wrapper or an interpreter with no script of its own is never offered as 
     "git",
     "git -C x commit",
     "git -c core.pager=less status",
+    // interpreters: sed/awk run a file's program (or write any path) with a flag
+    "sed -i s/a/b/ f",
+    "sed -f script.sed f",
+    // `sed 's/a/b/w out.txt'` is different: the write is in the script the words name, so that
+    // one stays rememberable (the person reads the whole script in the dialog).
+    "awk -f evil.awk data",
+    // (its program text is the words, so `awk '{print > $1}'` stays rememberable)
+    "sed -e 'w out.txt' f",
   ];
   for (const command of noRemember) {
     const decision = decideApproval(command, { ...ask, allow: [] });
