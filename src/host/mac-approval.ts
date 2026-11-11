@@ -131,7 +131,10 @@ function allowed(entry: readonly MacAllowEntry[], prefix: readonly string[]): Ma
  * would hand over every later command of that shape. Codex has the same list (`BANNED_PREFIX_
  * SUGGESTIONS` in exec_policy.rs): "sudo", "env", "xargs", a bare "python"/"bash", "rm".
  */
-const NEVER_REMEMBER = new Set(["sudo", "doas", "su", "env", "xargs", "nohup", "time", "timeout", "nice", "eval", "exec", "command", "builtin", "rm"]);
+// The shell's own settings are here for the same reason as the wrappers: remembering `alias ls=…`
+// or `export PATH=…` would let a later one run unasked, and the button says nothing a person can
+// reason about.
+const NEVER_REMEMBER = new Set(["sudo", "doas", "su", "env", "xargs", "nohup", "time", "timeout", "nice", "eval", "exec", "command", "builtin", "rm", "alias", "unalias", "export", "unset", "typeset", "declare", "local", "set", "setopt", "unsetopt", "source", ".", "trap"]);
 
 /**
  * Programs that run whatever they are handed, so only a prefix naming the script may be remembered.

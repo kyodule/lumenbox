@@ -205,7 +205,8 @@ test("syntax this file does not model is not a read (G2): zsh runs something the
     ['echo "$(rm x)"', /command substitution/],
     ['echo "`rm x`"', /command substitution/],
     ['cat "$(touch /tmp/pwn)"', /command substitution/],
-    ["echo ${x:-$(id -u)}", /command substitution/],
+    // `${x:-…}` is refused as an unmodelled expansion before the inner `$(` is looked at
+    ["echo ${x:-$(id -u)}", /expansion that is not modelled/],
   ];
   for (const [command, why] of cases) {
     const verdict = classifyShell(command);
@@ -223,10 +224,16 @@ test("syntax this file does not model is not a read (G2): zsh runs something the
 });
 
 test("an expansion inside a checked program's arguments is not a read (G3): `find . -${HOME:+delete}` deletes", () => {
-  for (const command of ["find . -${HOME:+delete}", 'find . "-${HOME:+delete}"', "sort -$X /tmp/y in", "rg $PATTERN src", "sed -e $S f"]) {
+  for (const command of ["find . -$FLAG", "sort -$O /tmp/y in", "rg $PATTERN src", "sed -e $S f", 'find . "-$FLAG"']) {
     const verdict = classifyShell(command);
     assert.equal(verdict.readOnly, false, command);
     if (!verdict.readOnly) assert.match(verdict.because, /expansion in .* arguments/, command);
+  }
+  // the more elaborate forms are refused earlier, as syntax this file does not model (H3)
+  for (const command of ["find . -${HOME:+delete}", 'find . "-${HOME:+delete}"', 'echo "${(e):-\\$(touch pwn)}"']) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, command);
+    if (!verdict.readOnly) assert.match(verdict.because, /expansion that is not modelled/, command);
   }
   // programs with no argument checks may still use expansions: expanding only chooses what to read
   for (const command of ["cat $HOME/.zshrc", 'ls "$HOME"', "echo ${PATH}", "grep -rn foo ${PWD}/src", "head -5 $FILE"]) {
@@ -277,5 +284,93 @@ test("awk statements end at braces too, so a comparison is not a print redirecti
   }
   for (const command of ["awk '{print $1 > \"out\"}' d", "awk '{ if ($1 > 5) print $2 > \"o\" }' d"]) {
     assert.equal(classifyShell(command).readOnly, false, command);
+  }
+});
+
+test("the seven holes from the differential run, each named for what the program actually did (H1/H2/H3/H4)", () => {
+  const holes: [string, RegExp, string][] = [
+    // `sort --o=pwn` is `--output=pwn`: getopt_long accepts the abbreviation. It wrote pwn.
+    ["sort --o=pwn in", /sort -o/, "sort wrote pwn through an abbreviated --output"],
+    ["sort --outp=pwn in", /sort -o/, "sort wrote pwn through an abbreviated --output"],
+    // `file -bC` is `-b -C`, and -C compiles the magic file. It wrote magic.mgc.
+    ["file -bC -m in", /file -C/, "file compiled magic.mgc from a short-option cluster"],
+    ["file --comp -m in", /file -C/, "file compiled magic.mgc through an abbreviated --compile"],
+    // `(e)` re-expands the value, so the escaped substitution inside ran. It created pwn.
+    ['echo "${(e):-\\$(touch pwn)}"', /expansion that is not modelled/, "zsh's (e) flag ran the escaped substitution"],
+    // git config's mutating options. They changed .git/config.
+    ["git config --unset-all user.name", /git config that writes/, "git config removed a key"],
+    ["git config --remove-section user", /git config that writes/, "git config removed a section"],
+  ];
+  for (const [command, why, what] of holes) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, `${command}: ${what}`);
+    if (!verdict.readOnly) assert.match(verdict.because, why, command);
+  }
+  // No change was visible in that run, but the judgement was still wrong.
+  const wrong: [string, RegExp][] = [
+    ["git stash", /git stash changing the stack/],
+    ["git stash push", /git stash changing the stack/],
+    ["git stash drop", /git stash changing the stack/],
+    ["less --log-f=pwn f", /less writing a log file/],
+    ["sort --comp=./x in", /sort --compress-program/],
+    ["git grep --open-f=touch a", /git grep running a program/],
+    ['echo "${HOME[\\$(touch pwn)]}"', /expansion that is not modelled/],
+  ];
+  for (const [command, why] of wrong) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, command);
+    if (!verdict.readOnly) assert.match(verdict.because, why, command);
+  }
+});
+
+test("long options are matched by abbreviation and short options by their cluster (H1/H2)", () => {
+  const abbreviations = ["sort --out=pwn in", "git show --outp=pwn", "less --log=pwn f", "tree --out=pwn", "rg --host ./x a", "diff --pag a b", "date --se 2020", "awk --file=in data"];
+  for (const command of abbreviations) assert.equal(classifyShell(command).readOnly, false, command);
+  const clusters = ["sort -ro pwn in", "tree -ao pwn", "file -cC -m in", "less -eO pwn f", "date -us 2020", "git grep -nO'touch pwn' a", "mount -av"];
+  for (const command of clusters) assert.equal(classifyShell(command).readOnly, false, command);
+  // and the same options, spelled safely, are still reads
+  for (const command of ["sort -n in", "less -N f", "file -b in", "tree -L 1 .", "date -R", "git grep -n TODO a", "mount", "awk -F: '{print $1}' in", "sort --stable in", "diff --stat in f"]) {
+    assert.equal(classifyShell(command).readOnly, true, command);
+  }
+});
+
+test("only $NAME and ${NAME} are read; every other expansion is unmodelled (H3)", () => {
+  for (const command of ["cat $HOME/.zshrc", 'ls "$HOME"', "echo ${PATH}", "grep -rn foo ${PWD}/src", "head -5 $FILE", "echo ${_x}"]) {
+    assert.equal(classifyShell(command).readOnly, true, command);
+  }
+  const refused = ["echo ${x:-y}", "echo $?", "echo $@", "echo $1", "echo $#", "echo $$", "echo ${(e)x}", "echo ${HOME[1]}", "echo $[1+1]", "echo $((1+1))", "echo ${~HOME}", "echo ${(s:,:)HOME}"];
+  for (const command of refused) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, command);
+    if (!verdict.readOnly) assert.match(verdict.because, /expansion that is not modelled/, command);
+  }
+});
+
+test("git config and git stash are whitelists (H4)", () => {
+  const reads = ["git config user.name", "git config --get user.name", "git config --get-all user.name", "git config --get-regexp 'user\\..*'", "git config -l", "git config --list --global", "git config --show-origin --get user.name", "git config get user.name", "git config list", "git stash list", "git stash show", "git stash show -p"];
+  for (const command of reads) assert.equal(classifyShell(command).readOnly, true, command);
+  const writes: [string, RegExp][] = [
+    ["git config user.name pwn", /git config/],
+    ["git config --global user.name pwn", /git config/],
+    ["git config --unset user.name", /git config that writes/],
+    ["git config --unset-all user.name", /git config that writes/],
+    ["git config --remove-section user", /git config that writes/],
+    ["git config --rename-section user pwn", /git config that writes/],
+    ["git config --add user.x pwn", /git config that writes/],
+    ["git config set user.name pwn", /git config/],
+    ["git config unset user.name", /git config/],
+    ["git config -f pwn a.b c", /git config that writes/],
+    ["git config --file=pwn a.b c", /git config that writes/],
+    ["git config --blob=HEAD:config a.b", /git config/],
+    ["git config --show-scope --list --unknown", /git config/],
+    ["git stash", /git stash/],
+    ["git stash push", /git stash/],
+    ["git stash pop", /git stash/],
+    ["git stash drop", /git stash/],
+  ];
+  for (const [command, why] of writes) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, command);
+    if (!verdict.readOnly) assert.match(verdict.because, why, command);
   }
 });

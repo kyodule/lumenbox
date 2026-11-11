@@ -304,7 +304,24 @@ export function unmodelledSyntax(command: string): string | undefined {
     scan.escaped[index] !== true && (scan.mode[index] === "plain" || scan.mode[index] === "double" || scan.mode[index] === "backtick");
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index]!;
-    if ((char === "`" || (char === "$" && text[index + 1] === "(")) && substitutes(index)) return "a command substitution";
+    // `$(` runs a command; `$((` is arithmetic, which is refused as unmodelled below.
+    if (char === "`" && substitutes(index)) return "a command substitution";
+    if (char === "$" && text[index + 1] === "(" && text[index + 2] !== "(" && substitutes(index)) return "a command substitution";
+    // zsh's parameter expansion has too many forms to model (flags, subscripts, `:-`, `$[`, …),
+    // and `(e)` re-expands its value, which is how `"${(e):-\$(touch pwn)}"` runs. Only `$NAME`
+    // and `${NAME}` are read; anything else is not known to be read-only.
+    if (char === "$" && substitutes(index)) {
+      const rest = text.slice(index + 1);
+      if (/^[A-Za-z_]/.test(rest)) {
+        // $NAME — the word is the value of a variable.
+      } else if (rest.startsWith("{")) {
+        const close = text.indexOf("}", index + 2);
+        const name = close === -1 ? "" : text.slice(index + 2, close);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return "an expansion that is not modelled";
+      } else {
+        return "an expansion that is not modelled";
+      }
+    }
     if (!active(scan, index)) continue;
     if (char === "(" || char === ")") return "a subshell or a pattern qualifier";
     if (char === "$" && (text[index + 1] === "'" || text[index + 1] === '"')) return "an ANSI-C or localised quote";
@@ -322,6 +339,26 @@ type Guard = (args: readonly string[]) => string | undefined;
 
 const has = (args: readonly string[], flag: RegExp) => args.some(arg => flag.test(arg));
 const positional = (args: readonly string[]) => args.filter(arg => !arg.startsWith("-"));
+
+/**
+ * A long option, including the abbreviation getopt_long accepts: `--o`, `--outp`, `--output=pwn`
+ * are all `--output`. An abbreviation of anything at least three characters long is taken as a
+ * hit even where it is ambiguous — asking costs a click, missing one costs the file.
+ */
+function longOption(args: readonly string[], name: string, ignoreCase = false): boolean {
+  const target = ignoreCase ? name.toLowerCase() : name;
+  return args.some(arg => {
+    const head = arg.split("=")[0]!;
+    if (!head.startsWith("--") || head.length < 3) return false;
+    const text = ignoreCase ? head.toLowerCase() : head;
+    return target.startsWith(text);
+  });
+}
+
+/** A short option, wherever it sits in a cluster: `-bC`, `-Nopwn`, `-o`, `-opwn`. */
+function shortOption(args: readonly string[], letter: string): boolean {
+  return args.some(arg => arg.length >= 2 && arg[0] === "-" && arg[1] !== "-" && arg.slice(1).includes(letter));
+}
 
 /** `uniq`'s positional arguments, ignoring the options that take a value. */
 function uniqPositional(args: readonly string[]): number {
@@ -391,7 +428,7 @@ function sedWrites(args: readonly string[]): string | undefined {
 
 /** awk: a program read from a file is invisible, and `system(`, `| getline` and `print >` reach out of it. */
 function awkWrites(args: readonly string[]): string | undefined {
-  if (has(args, /^-f|^--file|^-i/)) return "awk reading a program from a file";
+  if (shortOption(args, "f") || shortOption(args, "i") || longOption(args, "--file")) return "awk reading a program from a file";
   const program = args.filter(arg => !arg.startsWith("-")).join("\n");
   if (/system\s*\(/.test(program)) return "awk system()";
   if (/getline/.test(program) && /\|/.test(program)) return "awk piping into getline";
@@ -404,11 +441,31 @@ function awkWrites(args: readonly string[]): string | undefined {
 }
 
 /**
+ * `git config` is a whitelist: reading means one key on its own (`git config user.name`), the
+ * `--get*`/`--list` actions with a key, or the new `get`/`list` subcommands. `--file`/`--blob` read
+ * somewhere else and are not worth an approval-free path; everything else asks.
+ */
+function gitConfigWrites(args: readonly string[]): string | undefined {
+  const mutating = /^--(unset|unset-all|add|replace-all|edit|rename-section|remove-section|file|blob)(=|$)/;
+  if (args.some(arg => mutating.test(arg)) || shortOption(args, "f")) return "git config that writes";
+  const flags = args.filter(arg => arg.startsWith("-"));
+  const plain = args.filter(arg => !arg.startsWith("-"));
+  const reads = /^(--get|--get-all|--get-regexp|--list|-l)(=|$)/;
+  const scopes = /^(--global|--local|--system|--worktree|--show-origin|--show-scope|--null|-z|--name-only|--includes|--no-includes)(=|$)/;
+  if (!flags.every(arg => scopes.test(arg) || reads.test(arg))) return "a git config option that is not modelled";
+  const readAction = flags.some(arg => reads.test(arg));
+  if (plain[0] === "get") return plain.length >= 2 ? undefined : "git config get needs a key";
+  if (plain[0] === "list") return plain.length === 1 ? undefined : "git config list takes no key";
+  if (readAction) return undefined;
+  return plain.length === 1 ? undefined : "git config without a single key";
+}
+
+/**
  * git runs programs from its options long before the subcommand: `-c`/`--config-env` set a pager,
  * `grep -O` sets one too. Before the subcommand only these global options are harmless.
  */
 function gitWrites(args: readonly string[]): string | undefined {
-  if (args.some(arg => /^--output(=|$)/.test(arg))) return "git --output";
+  if (longOption(args, "--output")) return "git --output";
   if (args.some(arg => arg === "-c")) return "git -c";
   const rest: string[] = [];
   let seenSub = false;
@@ -436,8 +493,8 @@ function gitWrites(args: readonly string[]): string | undefined {
   const extra = plain.slice(1);
   const reading = new Set(["status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "rev-parse", "describe", "shortlog", "cat-file", "grep", "reflog", "count-objects", "config"]);
   if (sub === undefined) return "git with no subcommand";
-  if (sub === "grep" && rest.some(arg => /^-O|^--open-files-in-pager/.test(arg))) return "git grep running a program";
-  if (rest.some(arg => /^--(ext-diff|textconv)$/.test(arg))) return `git ${sub} running an external diff`;
+  if (sub === "grep" && (shortOption(rest, "O") || longOption(rest, "--open-files-in-pager"))) return "git grep running a program";
+  if (longOption(rest, "--ext-diff") || longOption(rest, "--textconv")) return `git ${sub} running an external diff`;
   // `reflog` deletes once it is given an action other than show.
   if (sub === "reflog" && extra[0] !== undefined && extra[0] !== "show") return "git reflog rewriting history";
   // A flag that deletes, moves or rewrites comes first, so `git branch -D old` says what it does.
@@ -450,10 +507,11 @@ function gitWrites(args: readonly string[]): string | undefined {
       !rest.some(arg => /^(-l|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/.test(arg))) {
     return `git ${sub} creating a ref`;
   }
-  if (sub === "stash" && extra[0] !== undefined && !/^(list|show)$/.test(extra[0])) return "git stash changing the stack";
+  // Bare `git stash` is `stash push`: only list and show read.
+  if (sub === "stash") return extra[0] !== undefined && /^(list|show)$/.test(extra[0]) ? undefined : "git stash changing the stack";
   if (sub === "remote" && extra[0] !== undefined) return "git remote changing a remote";
   if (sub === "branch" || sub === "tag" || sub === "remote" || sub === "stash") return undefined;
-  if (sub === "config") return rest.some(arg => /^--(unset|add|replace-all|edit)$/.test(arg)) || extra.length > 1 ? "git config that writes" : undefined;
+  if (sub === "config") return gitConfigWrites(rest.slice(1));
   return reading.has(sub) ? undefined : `git ${sub}`;
 }
 
@@ -504,26 +562,26 @@ const GUARDS: Record<string, Guard> = {
       ? undefined
       : "systemctl that changes state",
   sort: args =>
-    has(args, /^--compress-program(=|$)/) ? "sort --compress-program" : has(args, /^-[a-zA-Z]*o|^--output(=|$)/) ? "sort -o" : undefined,
+    longOption(args, "--compress-program") ? "sort --compress-program" : shortOption(args, "o") || longOption(args, "--output") ? "sort -o" : undefined,
   // `xxd in out` writes the second path; with no output path it only prints.
   xxd: args => (positional(args).length >= 2 ? "xxd writing a file" : undefined),
   // `--pre` and `--hostname-bin` turn their argument into a program; `--pager` likewise.
-  rg: args => (has(args, /^--pre/) ? "rg --pre" : has(args, /^--hostname-bin/) ? "rg --hostname-bin" : has(args, /^--pager/) ? "rg --pager" : undefined),
-  ag: args => (has(args, /^--pre/) ? "ag --pre" : has(args, /^--hostname-bin/) ? "ag --hostname-bin" : has(args, /^--pager/) ? "ag --pager" : undefined),
-  tree: args => (has(args, /^-o|^--output/) ? "tree -o" : undefined),
+  rg: args => (longOption(args, "--pre") || longOption(args, "--pre-glob") ? "rg --pre" : longOption(args, "--hostname-bin") ? "rg --hostname-bin" : longOption(args, "--pager") ? "rg --pager" : undefined),
+  ag: args => (longOption(args, "--pre") || longOption(args, "--pre-glob") ? "ag --pre" : longOption(args, "--hostname-bin") ? "ag --hostname-bin" : longOption(args, "--pager") ? "ag --pager" : undefined),
+  tree: args => (shortOption(args, "o") || longOption(args, "--output") ? "tree -o" : undefined),
   // `uniq in out` writes out; the options that take a value are not positional arguments.
   uniq: args => (uniqPositional(args) >= 2 ? "uniq writing its second file" : undefined),
-  file: args => (has(args, /^-C|^--compile/) ? "file -C compiling a magic file" : undefined),
-  less: args => (has(args, /^-No|^-[a-zA-Z]*[oO]|^--log-file/) ? "less writing a log file" : undefined),
-  more: args => (has(args, /^-No|^-[a-zA-Z]*[oO]|^--log-file/) ? "more writing a log file" : undefined),
-  date: args => (has(args, /^-[a-zA-Z]*s|^--set/) ? "date setting the clock" : undefined),
+  file: args => (shortOption(args, "C") || longOption(args, "--compile") ? "file -C compiling a magic file" : undefined),
+  less: args => (shortOption(args, "o") || shortOption(args, "O") || longOption(args, "--log-file", true) ? "less writing a log file" : undefined),
+  more: args => (shortOption(args, "o") || shortOption(args, "O") || longOption(args, "--log-file", true) ? "more writing a log file" : undefined),
+  date: args => (shortOption(args, "s") || longOption(args, "--set") ? "date setting the clock" : undefined),
   hostname: args => (positional(args).length > 0 ? "hostname setting the name" : undefined),
   // `--paginate` runs whatever PAGER names.
-  diff: args => (has(args, /^--paginate/) ? "diff running a pager" : undefined),
+  diff: args => (longOption(args, "--paginate") ? "diff running a pager" : undefined),
   // `command -v node` asks where it is. `command node` runs it, and so does `command rm x`.
   command: args => (args[0] === "-v" || args[0] === "-V" ? (args.length === 2 ? undefined : "command running a program") : "command running a program"),
   // No argument lists what is mounted; anything else attaches a filesystem, and `-a` attaches all.
-  mount: args => (positional(args).length > 0 || has(args, /^-[a-zA-Z]*a/) ? "mount attaching a filesystem" : undefined),
+  mount: args => (positional(args).length > 0 || shortOption(args, "a") ? "mount attaching a filesystem" : undefined),
 };
 
 /** Every program with its own check; exported so a test can hold the list still. */
