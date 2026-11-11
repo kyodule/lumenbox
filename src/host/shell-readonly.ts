@@ -24,6 +24,8 @@ const READERS = new Set([
   "false", "test", "[", "grep", "egrep", "fgrep", "rg", "ag", "column", "nl", "tac", "rev",
   "hostname", "arch", "nproc", "lscpu", "lsblk", "mount", "env", "locale", "seq", "yes", "bc",
   "expr", "sleep", "tty", "w", "who", "last", "lsof", "dig", "nslookup", "host",
+  // Only this command's own shell changes directory; the next command starts where it did.
+  "cd",
 ]);
 
 /** Readers with a flag or subcommand that writes; each gets its own check. */
@@ -40,17 +42,32 @@ function guarded(name: string, args: readonly string[]): string | undefined {
     case "git": {
       // `--output` writes a file on any subcommand, including the reading ones.
       if (has(/^--output(=|$)/)) return "git --output";
-      const sub = args.find(arg => !arg.startsWith("-"));
+      // `-c key=value` can point a pager at a program, so it is not skipped like -C.
+      if (has(/^-c$/)) return "git -c";
+      // `-C <dir>` only says where to run, and may repeat; after the subcommand it is a branch copy.
+      const rest: string[] = [];
+      let seenSub = false;
+      for (let index = 0; index < args.length; index += 1) {
+        const arg = args[index]!;
+        if (!seenSub && arg === "-C") {
+          index += 1;
+          continue;
+        }
+        if (!seenSub && !arg.startsWith("-")) seenSub = true;
+        rest.push(arg);
+      }
+      const plain = rest.filter(arg => !arg.startsWith("-"));
+      const sub = plain[0];
       const reading = new Set(["status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "rev-parse", "describe", "shortlog", "cat-file", "grep", "reflog", "count-objects", "config"]);
       if (sub === undefined) return "git with no subcommand";
       if (sub === "branch" || sub === "tag" || sub === "remote" || sub === "stash") {
-        return has(/^-(d|D|m|M|c|C|f|u)$|^--(delete|move|copy|force|set-upstream|unset-upstream|edit-description)$/) ||
-          (sub === "remote" && args.filter(arg => !arg.startsWith("-")).length > 1) ||
-          (sub === "stash" && args.filter(arg => !arg.startsWith("-")).length > 1 && !/^(list|show)$/.test(args.filter(arg => !arg.startsWith("-"))[1] ?? ""))
+        return rest.some(arg => /^-(d|D|m|M|c|C|f|u)$|^--(delete|move|copy|force|set-upstream|unset-upstream|edit-description)$/.test(arg)) ||
+          (sub === "remote" && plain.length > 1) ||
+          (sub === "stash" && plain.length > 1 && !/^(list|show)$/.test(plain[1] ?? ""))
           ? `git ${sub} that changes refs`
           : undefined;
       }
-      if (sub === "config") return has(/^--(unset|add|replace-all|edit)$/) || args.filter(arg => !arg.startsWith("-")).length > 2 ? "git config that writes" : undefined;
+      if (sub === "config") return rest.some(arg => /^--(unset|add|replace-all|edit)$/.test(arg)) || plain.length > 2 ? "git config that writes" : undefined;
       return reading.has(sub) ? undefined : `git ${sub}`;
     }
     case "docker":
@@ -84,6 +101,11 @@ function guarded(name: string, args: readonly string[]): string | undefined {
     case "ag":
       // `--pre` turns its argument into a program to run; `--pre-glob` rides along with it.
       return has(/^--pre/) ? `${name} --pre` : undefined;
+    case "command": {
+      // `command -v node` asks where it is. `command node` runs it, and so does `command rm x`.
+      const first = args[0];
+      return (first === "-v" || first === "-V") && args.length === 2 ? undefined : "command running a program";
+    }
     case "mount":
       // No argument lists what is mounted; anything else attaches a filesystem, and `-a` attaches all.
       return args.filter(arg => !arg.startsWith("-")).length > 0 || has(/^-[a-zA-Z]*a/) ? "mount attaching a filesystem" : undefined;
@@ -92,7 +114,7 @@ function guarded(name: string, args: readonly string[]): string | undefined {
   }
 }
 
-const NEVER = /(^|[\s;&|(])(sudo|doas|su|eval|exec|xargs|source|sh|bash|zsh|dash|ksh|fish|env|nohup|timeout|watch|nice|ionice|command|builtin|time|script|tee|dd|rm|mv|cp|chmod|chown|chgrp|ln|mkdir|rmdir|touch|truncate|shred|kill|pkill|killall|curl|wget|ssh|scp|rsync|ftp|sftp|nc|ncat|telnet|apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo|go|make|tar|zip|unzip|gzip|gunzip|crontab|mkfs|fdisk|umount|reboot|shutdown|halt|poweroff|passwd|useradd|userdel|usermod|iptables|nft|ufw)(\s|$)/;
+const NEVER = /(^|[\s;&|(])(sudo|doas|su|eval|exec|xargs|source|sh|bash|zsh|dash|ksh|fish|env|nohup|timeout|watch|nice|ionice|builtin|time|script|tee|dd|rm|mv|cp|chmod|chown|chgrp|ln|mkdir|rmdir|touch|truncate|shred|kill|pkill|killall|curl|wget|ssh|scp|rsync|ftp|sftp|nc|ncat|telnet|apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo|go|make|tar|zip|unzip|gzip|gunzip|crontab|mkfs|fdisk|umount|reboot|shutdown|halt|poweroff|passwd|useradd|userdel|usermod|iptables|nft|ufw)(\s|$)/;
 
 /** Splits on |, ||, &&, ;, and newlines — outside quotes. Null when the quoting is unbalanced. */
 export function segments(command: string): string[] | null {
@@ -142,8 +164,56 @@ export function words(segment: string): string[] | null {
   return out.length === 0 ? null : out;
 }
 
+/**
+ * The command with the redirections that discard output taken out: `2>/dev/null`, `>/dev/null`,
+ * `&>/dev/null`, `2>&1`, `>&2`, `</dev/null`. Only a target that is exactly `/dev/null`, and only
+ * outside quotes, so `>/dev/null/../x`, `>/dev/nullx`, `>&file` and `grep "2>/dev/null" f` are
+ * left alone. One function because both judgements must see the same text: `2>&1` holds an `&`,
+ * and splitting before removing it would turn one command into two.
+ */
+export function stripDiscardRedirects(command: string): string {
+  let out = "";
+  let quote: '"' | "'" | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (quote !== undefined) {
+      out += char;
+      if (char === "\\" && quote === '"') {
+        out += command[index + 1] ?? "";
+        index += 1;
+      } else if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === "\\") {
+      out += char + (command[index + 1] ?? "");
+      index += 1;
+      continue;
+    }
+    const rest = command.slice(index);
+    // One descriptor pointed at another (2>&1, >&2): a stream, never a file.
+    const dup = /^(\d*)>&(\d+)/.exec(rest);
+    if (dup !== null) {
+      index += dup[0].length - 1;
+      continue;
+    }
+    // A redirection whose target is exactly /dev/null, which keeps nothing.
+    const discard = /^(\d*|&)(>>?|<)\s*\/dev\/null(?=$|[\s;&|)])/.exec(rest);
+    if (discard !== null) {
+      index += discard[0].length - 1;
+      continue;
+    }
+    out += char;
+  }
+  return out;
+}
+
 export function classifyShell(command: string): ShellClass {
-  const text = command.trim();
+  const text = stripDiscardRedirects(command).trim();
   if (text === "") return { readOnly: false, because: "empty command" };
   if (/(^|[^<])>|<\(|>\(/.test(text.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, ""))) {
     return { readOnly: false, because: "a redirection" };
@@ -162,7 +232,7 @@ export function classifyShell(command: string): ShellClass {
     const name = argv[0]!.replace(/^.*\//, "");
     const reason = guarded(name, argv.slice(1));
     if (reason !== undefined) return { readOnly: false, because: reason };
-    if (!READERS.has(name) && !["find", "sed", "awk", "gawk", "git", "docker", "podman", "npm", "pnpm", "yarn", "node", "python", "python3", "kubectl", "systemctl"].includes(name)) {
+    if (!READERS.has(name) && !["find", "sed", "awk", "gawk", "git", "docker", "podman", "npm", "pnpm", "yarn", "node", "python", "python3", "kubectl", "systemctl", "command"].includes(name)) {
       return { readOnly: false, because: `${name} is not a known reader` };
     }
   }
