@@ -63,6 +63,13 @@ export function readOnly(command: string): boolean {
  * has to be right about quoting. `segments()` cannot see the three things below, which is why
  * they are refused a prefix rather than split again.
  */
+/**
+ * Words that make a segment a piece of shell syntax rather than a command (`for`, `while`, `if`,
+ * `{`, …). A prefix made of one of these is not a grant on anything a person could reason about:
+ * `for d` would be offered for a loop whose body is the next segment.
+ */
+const SHELL_KEYWORDS = new Set(["for", "while", "until", "if", "case", "select", "function", "do", "done", "then", "else", "elif", "fi", "esac", "{", "}", "!", "[[", "coproc"]);
+
 export function shellParts(command: string): string[] | null {
   // What is thrown away is not part of the command, and `2>&1` would otherwise split on its `&`.
   const text = stripDiscardRedirects(command);
@@ -76,6 +83,10 @@ export function shellParts(command: string): string[] | null {
   if (/[<>]/.test(text.replace(/'(?:[^']*)'|"(?:[^"\\]|\\.)*"/g, ""))) return null;
   const parts = segments(text);
   if (parts === null) return null; // unbalanced quotes: no way to tell where a part ends
+  for (const part of parts) {
+    const head = words(part)?.[0];
+    if (head !== undefined && SHELL_KEYWORDS.has(head)) return null;
+  }
   // `FOO=bar command`: what the assignment prefixes may be anything at all.
   if (parts.some(part => /^[A-Za-z_][A-Za-z0-9_]*=/.test(part))) return null;
   return parts;

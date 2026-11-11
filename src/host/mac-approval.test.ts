@@ -220,3 +220,43 @@ test("the prefixes that carry the command themselves stay rememberable", () => {
     assert.equal(decision.kind === "ask" ? decision.remember : "", `Always allow ${prefix}`, command);
   }
 });
+
+test("shell keywords are not a prefix: a loop or a branch gets one run, no standing grant", () => {
+  for (const command of [
+    "for d in a b; do echo $d; done",
+    "while read line; do echo $line; done",
+    "until false; do ls; done",
+    "if [ -d x ]; then ls; fi",
+    "case x in a) ls;; esac",
+    "select x in a b; do ls; done",
+    "! rm x",
+    "{ rm x; }",
+    "[[ -d x ]] && ls",
+  ]) {
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "ask", command);
+    assert.equal(decision.kind === "ask" ? decision.remember : "x", undefined, `${command} must not offer "always allow"`);
+  }
+  assert.equal(shellParts("for d in a b; do echo $d; done"), null, "a keyword line is not a list of plain commands");
+  assert.deepEqual(shellParts("ls && cat x"), ["ls", "cat x"], "plain commands still split");
+});
+
+test("a flag that writes is a question, not a read, all the way through decide", () => {
+  for (const command of [
+    "echo x >&1file",
+    "git grep -O'touch /tmp/pwn' x",
+    "git --config-env=core.pager=X log",
+    "rg --hostname-bin ./evil x",
+    "tree -o /tmp/out.txt",
+    "uniq in.txt out.txt",
+    "file -C -m magic",
+    "awk -f evil.awk data",
+    "sed 's/a/b/w out.txt' f",
+  ]) {
+    assert.equal(decideApproval(command, { ...ask, allow: [] }).kind, "ask", command);
+  }
+  // the same commands without the writing flag still run unasked
+  for (const command of ["echo x 2>&1", "git grep pattern", "rg TODO src", "tree src", "uniq in.txt", "file notes.txt", "awk '{print $1}' data", "sed 's/a/b/' f"]) {
+    assert.equal(decideApproval(command, { ...ask, allow: [] }).kind, "auto", command);
+  }
+});

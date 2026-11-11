@@ -22,63 +22,40 @@ const READERS = new Set([
   "tree", "diff", "cmp", "md5sum", "sha1sum", "sha256sum", "shasum", "sort", "uniq", "cut", "tr",
   "jq", "xxd", "hexdump", "strings", "basename", "dirname", "realpath", "readlink", "true",
   "false", "test", "[", "grep", "egrep", "fgrep", "rg", "ag", "column", "nl", "tac", "rev",
-  "hostname", "arch", "nproc", "lscpu", "lsblk", "mount", "env", "locale", "seq", "yes", "bc",
+  // `yes` writes an endless stream and reads nothing; `bc` is a language interpreter whose only
+  // input is arithmetic. Neither is worth an approval-free path, so both ask like any unknown word.
+  "hostname", "arch", "nproc", "lscpu", "lsblk", "mount", "env", "locale", "seq",
   "expr", "sleep", "tty", "w", "who", "last", "lsof", "dig", "nslookup", "host",
   // Only this command's own shell changes directory; the next command starts where it did.
   "cd",
 ]);
 
-/** Readers with a flag or subcommand that writes; each gets its own check. */
+/** The judgement needs a parser per program for these: each has a flag or a subcommand that writes. */
+const GUARDED_NAMES = new Set(["find", "sed", "awk", "gawk", "git", "docker", "podman", "npm", "pnpm", "yarn", "node", "python", "python3", "kubectl", "systemctl", "command"]);
+
+/** Readers with a flag or subcommand that writes or runs a program; each gets its own check. */
 function guarded(name: string, args: readonly string[]): string | undefined {
   const has = (flag: RegExp) => args.some(arg => flag.test(arg));
+  const positional = args.filter(arg => !arg.startsWith("-"));
   switch (name) {
     case "find":
       return has(/^-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/) ? "find with an action flag" : undefined;
     case "sed":
-      return has(/^-[a-zA-Z]*i/) || has(/^--in-place/) ? "sed -i" : has(/(^|;)\s*w\s/) ? "sed w" : undefined;
+      return sedWrites(args);
     case "awk":
     case "gawk":
-      return args.some(arg => /system\s*\(|>\s*"|>\s*'|\|\s*"/.test(arg)) ? "awk writing or spawning" : undefined;
-    case "git": {
-      // `--output` writes a file on any subcommand, including the reading ones.
-      if (has(/^--output(=|$)/)) return "git --output";
-      // `-c key=value` can point a pager at a program, so it is not skipped like -C.
-      if (has(/^-c$/)) return "git -c";
-      // `-C <dir>` only says where to run, and may repeat; after the subcommand it is a branch copy.
-      const rest: string[] = [];
-      let seenSub = false;
-      for (let index = 0; index < args.length; index += 1) {
-        const arg = args[index]!;
-        if (!seenSub && arg === "-C") {
-          index += 1;
-          continue;
-        }
-        if (!seenSub && !arg.startsWith("-")) seenSub = true;
-        rest.push(arg);
-      }
-      const plain = rest.filter(arg => !arg.startsWith("-"));
-      const sub = plain[0];
-      const reading = new Set(["status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "rev-parse", "describe", "shortlog", "cat-file", "grep", "reflog", "count-objects", "config"]);
-      if (sub === undefined) return "git with no subcommand";
-      if (sub === "branch" || sub === "tag" || sub === "remote" || sub === "stash") {
-        return rest.some(arg => /^-(d|D|m|M|c|C|f|u)$|^--(delete|move|copy|force|set-upstream|unset-upstream|edit-description)$/.test(arg)) ||
-          (sub === "remote" && plain.length > 1) ||
-          (sub === "stash" && plain.length > 1 && !/^(list|show)$/.test(plain[1] ?? ""))
-          ? `git ${sub} that changes refs`
-          : undefined;
-      }
-      if (sub === "config") return rest.some(arg => /^--(unset|add|replace-all|edit)$/.test(arg)) || plain.length > 2 ? "git config that writes" : undefined;
-      return reading.has(sub) ? undefined : `git ${sub}`;
-    }
+      return awkWrites(args);
+    case "git":
+      return gitWrites(args);
     case "docker":
     case "podman": {
-      const sub = args.find(arg => !arg.startsWith("-"));
+      const sub = positional[0];
       return sub !== undefined && /^(ps|images|logs|inspect|version|info|stats|top|port|diff|history)$/.test(sub) ? undefined : `docker ${sub ?? ""}`.trim();
     }
     case "npm":
     case "pnpm":
     case "yarn": {
-      const sub = args.find(arg => !arg.startsWith("-"));
+      const sub = positional[0];
       return sub !== undefined && /^(ls|list|view|info|outdated|why|--version|-v|audit)$/.test(sub) && !has(/^--fix$/) ? undefined : `${name} ${sub ?? ""}`.trim();
     }
     case "node":
@@ -86,7 +63,7 @@ function guarded(name: string, args: readonly string[]): string | undefined {
     case "python3":
       return args.length === 1 && /^(-v|--version|-V)$/.test(args[0]!) ? undefined : `${name} running code`;
     case "kubectl": {
-      const sub = args.find(arg => !arg.startsWith("-"));
+      const sub = positional[0];
       return sub !== undefined && /^(get|describe|logs|top|version|explain|api-resources)$/.test(sub) ? undefined : `kubectl ${sub ?? ""}`.trim();
     }
     case "systemctl":
@@ -96,11 +73,28 @@ function guarded(name: string, args: readonly string[]): string | undefined {
       return has(/^--compress-program(=|$)/) ? "sort --compress-program" : has(/^-[a-zA-Z]*o|^--output(=|$)/) ? "sort -o" : undefined;
     case "xxd":
       // `xxd in out` writes the second path; with no output path it only prints.
-      return args.filter(arg => !arg.startsWith("-")).length >= 2 ? "xxd writing a file" : undefined;
+      return positional.length >= 2 ? "xxd writing a file" : undefined;
     case "rg":
     case "ag":
-      // `--pre` turns its argument into a program to run; `--pre-glob` rides along with it.
-      return has(/^--pre/) ? `${name} --pre` : undefined;
+      // `--pre` and `--hostname-bin` turn their argument into a program; `--pager` likewise.
+      return has(/^--pre/) ? `${name} --pre` : has(/^--hostname-bin/) ? `${name} --hostname-bin` : has(/^--pager/) ? `${name} --pager` : undefined;
+    case "tree":
+      return has(/^-o|^--output/) ? "tree -o" : undefined;
+    case "uniq":
+      // `uniq in out` writes out; the options that take a value are not positional arguments.
+      return uniqPositional(args) >= 2 ? "uniq writing its second file" : undefined;
+    case "file":
+      return has(/^-C|^--compile/) ? "file -C compiling a magic file" : undefined;
+    case "less":
+    case "more":
+      return has(/^-[oO]|^--log-file/) ? `${name} writing a log file` : undefined;
+    case "date":
+      return has(/^-[a-zA-Z]*s|^--set/) ? "date setting the clock" : undefined;
+    case "hostname":
+      return positional.length > 0 ? "hostname setting the name" : undefined;
+    case "diff":
+      // `--paginate` runs whatever PAGER names.
+      return has(/^--paginate/) ? "diff running a pager" : undefined;
     case "command": {
       // `command -v node` asks where it is. `command node` runs it, and so does `command rm x`.
       const first = args[0];
@@ -108,13 +102,134 @@ function guarded(name: string, args: readonly string[]): string | undefined {
     }
     case "mount":
       // No argument lists what is mounted; anything else attaches a filesystem, and `-a` attaches all.
-      return args.filter(arg => !arg.startsWith("-")).length > 0 || has(/^-[a-zA-Z]*a/) ? "mount attaching a filesystem" : undefined;
+      return positional.length > 0 || has(/^-[a-zA-Z]*a/) ? "mount attaching a filesystem" : undefined;
     default:
       return undefined;
   }
 }
 
-const NEVER = /(^|[\s;&|(])(sudo|doas|su|eval|exec|xargs|source|sh|bash|zsh|dash|ksh|fish|env|nohup|timeout|watch|nice|ionice|builtin|time|script|tee|dd|rm|mv|cp|chmod|chown|chgrp|ln|mkdir|rmdir|touch|truncate|shred|kill|pkill|killall|curl|wget|ssh|scp|rsync|ftp|sftp|nc|ncat|telnet|apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo|go|make|tar|zip|unzip|gzip|gunzip|crontab|mkfs|fdisk|umount|reboot|shutdown|halt|poweroff|passwd|useradd|userdel|usermod|iptables|nft|ufw)(\s|$)/;
+/** `uniq`'s positional arguments, ignoring the options that take a value. */
+function uniqPositional(args: readonly string[]): number {
+  let count = 0;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (/^(-f|-s|-w|--skip-fields|--skip-chars|--check-chars)$/.test(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * sed is judged by what its scripts can do, not by a list of bad flags: `s///w`, `1e`, `w` and a
+ * script read from a file can all write or run a command, and the space of scripts is too large to
+ * deny flag by flag. Only `p`, `d`, `q`, `=` on addresses, and `s///` with printing flags, are reads.
+ */
+function sedWrites(args: readonly string[]): string | undefined {
+  if (args.some(arg => /^-[a-zA-Z]*i|^--in-place/.test(arg))) return "sed -i";
+  if (args.some(arg => /^-[a-zA-Z]*f|^--file/.test(arg))) return "sed -f";
+  const scripts: string[] = [];
+  let sawExpression = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "-e" || arg === "--expression") {
+      scripts.push(args[index + 1] ?? "");
+      sawExpression = true;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--expression=")) {
+      scripts.push(arg.slice("--expression=".length));
+      sawExpression = true;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    // With -e every positional is a file; without it the first one is the script.
+    if (!sawExpression) scripts.push(arg);
+    break;
+  }
+  if (scripts.length === 0) return "sed with no script";
+  for (const script of scripts) {
+    for (const piece of script.split(";")) {
+      const text = piece.trim();
+      if (text === "") continue;
+      const prints = /^(\d+|\$|\/[^/]*\/)?(,(\d+|\$|\/[^/]*\/))?[pdq=]$/.test(text);
+      const substitutes = /^s\/([^/\\]|\\.)*\/([^/\\]|\\.)*\/[gpIi0-9]*$/.test(text);
+      if (!prints && !substitutes) return "sed script that may write or run";
+    }
+  }
+  return undefined;
+}
+
+/** awk: a program read from a file is invisible, and `system(`, `| getline` and `print >` reach out of it. */
+function awkWrites(args: readonly string[]): string | undefined {
+  if (args.some(arg => /^-f|^--file|^-i/.test(arg))) return "awk reading a program from a file";
+  const program = args.filter(arg => !arg.startsWith("-")).join("\n");
+  if (/system\s*\(/.test(program)) return "awk system()";
+  if (/getline/.test(program) && /\|/.test(program)) return "awk piping into getline";
+  for (const statement of program.split(/[;\n]/)) {
+    if (/\b(print|printf)\b/.test(statement) && /[>|]/.test(statement)) return "awk writing a file or a pipe";
+  }
+  return undefined;
+}
+
+/**
+ * git runs programs from its options long before the subcommand: `-c`/`--config-env` set a pager,
+ * and `grep -O` sets one too. Before the subcommand only these global options are harmless; any
+ * other one asks.
+ */
+function gitWrites(args: readonly string[]): string | undefined {
+  if (args.some(arg => /^--output(=|$)/.test(arg))) return "git --output";
+  if (args.some(arg => arg === "-c")) return "git -c";
+  const rest: string[] = [];
+  let seenSub = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (seenSub) {
+      rest.push(arg);
+      continue;
+    }
+    if (arg === "-C") {
+      index += 1;
+      continue;
+    }
+    if (arg === "--no-pager" || arg === "-P" || arg === "--no-optional-locks") continue;
+    if (/^--(git-dir|work-tree)=/.test(arg)) continue;
+    if (!arg.startsWith("-")) {
+      seenSub = true;
+      rest.push(arg);
+      continue;
+    }
+    return `git global option ${arg.split("=")[0]}`;
+  }
+  const plain = rest.filter(arg => !arg.startsWith("-"));
+  const sub = plain[0];
+  const reading = new Set(["status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "rev-parse", "describe", "shortlog", "cat-file", "grep", "reflog", "count-objects", "config"]);
+  if (sub === undefined) return "git with no subcommand";
+  if (sub === "grep" && rest.some(arg => /^-O|^--open-files-in-pager/.test(arg))) return "git grep running a program";
+  if (rest.some(arg => /^--(ext-diff|textconv)$/.test(arg))) return `git ${sub} running an external diff`;
+  if (sub === "branch" || sub === "tag" || sub === "remote" || sub === "stash") {
+    return rest.some(arg => /^-(d|D|m|M|c|C|f|u)$|^--(delete|move|copy|force|set-upstream|unset-upstream|edit-description)$/.test(arg)) ||
+      (sub === "remote" && plain.length > 1) ||
+      (sub === "stash" && plain.length > 1 && !/^(list|show)$/.test(plain[1] ?? ""))
+      ? `git ${sub} that changes refs`
+      : undefined;
+  }
+  if (sub === "config") return rest.some(arg => /^--(unset|add|replace-all|edit)$/.test(arg)) || plain.length > 2 ? "git config that writes" : undefined;
+  return reading.has(sub) ? undefined : `git ${sub}`;
+}
+
+/**
+ * Commands that must be asked about wherever they are the command, whatever their arguments.
+ *
+ * Matched against each segment's first word only. The whole-command scan this replaced also
+ * refused `grep -rn source src` and `cat make`, because a dangerous word appeared among the
+ * arguments — where it names a pattern or a file, not a command.
+ */
+const NEVER = new Set(["sudo", "doas", "su", "eval", "exec", "xargs", "source", "sh", "bash", "zsh", "dash", "ksh", "fish", "env", "nohup", "timeout", "watch", "nice", "ionice", "builtin", "time", "script", "tee", "dd", "rm", "mv", "cp", "chmod", "chown", "chgrp", "ln", "mkdir", "rmdir", "touch", "truncate", "shred", "kill", "pkill", "killall", "curl", "wget", "ssh", "scp", "rsync", "ftp", "sftp", "nc", "ncat", "telnet", "apt", "apt-get", "yum", "dnf", "brew", "pip", "pip3", "gem", "cargo", "go", "make", "tar", "zip", "unzip", "gzip", "gunzip", "crontab", "mkfs", "fdisk", "umount", "reboot", "shutdown", "halt", "poweroff", "passwd", "useradd", "userdel", "usermod", "iptables", "nft", "ufw"]);
 
 /** Splits on |, ||, &&, ;, and newlines — outside quotes. Null when the quoting is unbalanced. */
 export function segments(command: string): string[] | null {
@@ -196,7 +311,8 @@ export function stripDiscardRedirects(command: string): string {
     }
     const rest = command.slice(index);
     // One descriptor pointed at another (2>&1, >&2): a stream, never a file.
-    const dup = /^(\d*)>&(\d+)/.exec(rest);
+    // The boundary matters: `>&1file` writes to a file named 1file, it does not copy a stream.
+    const dup = /^(\d*)>&(\d+)(?=$|[\s;&|)])/.exec(rest);
     if (dup !== null) {
       index += dup[0].length - 1;
       continue;
@@ -220,8 +336,6 @@ export function classifyShell(command: string): ShellClass {
   }
   const unquoted = text.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, "");
   if (/\$\(|`/.test(unquoted)) return { readOnly: false, because: "a command substitution" };
-  const never = NEVER.exec(unquoted);
-  if (never !== null) return { readOnly: false, because: never[2]! };
   const parts = segments(text);
   if (parts === null) return { readOnly: false, because: "unbalanced quotes" };
   for (const part of parts) {
@@ -230,9 +344,11 @@ export function classifyShell(command: string): ShellClass {
     // A leading VAR=value is a wrapper; what it wraps may be anything.
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0]!)) return { readOnly: false, because: "an environment prefix" };
     const name = argv[0]!.replace(/^.*\//, "");
+    // Where it matters is the command position: `grep source src` reads, `source src` runs.
+    if (NEVER.has(name)) return { readOnly: false, because: name };
     const reason = guarded(name, argv.slice(1));
     if (reason !== undefined) return { readOnly: false, because: reason };
-    if (!READERS.has(name) && !["find", "sed", "awk", "gawk", "git", "docker", "podman", "npm", "pnpm", "yarn", "node", "python", "python3", "kubectl", "systemctl", "command"].includes(name)) {
+    if (!READERS.has(name) && !GUARDED_NAMES.has(name)) {
       return { readOnly: false, because: `${name} is not a known reader` };
     }
   }
