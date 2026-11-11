@@ -24,7 +24,7 @@
  * which is the trade the design takes: commands run as them, where they could type them.
  */
 
-import { classifyShell, segments, words } from "./shell-readonly.ts";
+import { classifyShell, segments, stripDiscardRedirects, words } from "./shell-readonly.ts";
 
 /** The Mac's own switch, as `~/.agentbox/host-exec.json` spells it. */
 export type MacApprovalMode = "off" | "ask" | "always";
@@ -43,7 +43,7 @@ export type MacApprovalDecision =
    * present, is the label of the button that allows these words from then on, and `prefix` is the
    * text that gets stored when it is pressed.
    */
-  | { kind: "ask"; once: string; remember?: string; prefix: string }
+  | { kind: "ask"; once: string; remember?: string; prefix: string; prefixWords: string[] }
   | { kind: "refuse"; because: string };
 
 /** The dialog's buttons, in the person's language. */
@@ -64,15 +64,17 @@ export function readOnly(command: string): boolean {
  * they are refused a prefix rather than split again.
  */
 export function shellParts(command: string): string[] | null {
+  // What is thrown away is not part of the command, and `2>&1` would otherwise split on its `&`.
+  const text = stripDiscardRedirects(command);
   // `$(...)` and backticks run a command named nowhere in the words. They stay active inside
   // double quotes (and `classifyShell` is fooled by exactly that: `cat "$(rm x)"` reads as a
   // `cat`), so this check runs before quotes are stripped — single quotes only, where they are
   // literal.
-  if (/\$\(|`/.test(command.replace(/'[^']*'/g, ""))) return null;
+  if (/\$\(|`/.test(text.replace(/'[^']*'/g, ""))) return null;
   // A redirection writes somewhere that is not a word of the command, and `$( )`-free or not,
   // no prefix covers it. Outside quotes only: `grep "a>b"` writes nothing.
-  if (/[<>]/.test(command.replace(/'(?:[^']*)'|"(?:[^"\\]|\\.)*"/g, ""))) return null;
-  const parts = segments(command);
+  if (/[<>]/.test(text.replace(/'(?:[^']*)'|"(?:[^"\\]|\\.)*"/g, ""))) return null;
+  const parts = segments(text);
   if (parts === null) return null; // unbalanced quotes: no way to tell where a part ends
   // `FOO=bar command`: what the assignment prefixes may be anything at all.
   if (parts.some(part => /^[A-Za-z_][A-Za-z0-9_]*=/.test(part))) return null;
@@ -86,10 +88,55 @@ export function commandPrefix(command: string): { words: string[]; text: string 
   return { words: head, text: head.join(" ") };
 }
 
+/** Two prefixes are the same when their words are: compared as words, never as one string split back apart. */
+function sameWords(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((word, index) => word === right[index]);
+}
+
+/**
+ * The allow list after the person chose "always allow" for these words: this prefix on it once,
+ * newest last, no longer than `max` (the oldest fall off).
+ *
+ * Here rather than in Electron because this is the part that can silently do nothing, and a
+ * silent "remember" was the bug: the dialog and the file disagreed about the shape of a prefix.
+ * One function, its own tests, and both sides call it.
+ */
+export function rememberPrefix(allow: readonly MacAllowEntry[], prefixWords: readonly string[], at: string, max = 50): MacAllowEntry[] {
+  const kept = allow.filter(one => !sameWords(one.prefix, prefixWords));
+  kept.push({ prefix: [...prefixWords], at });
+  while (kept.length > max) kept.shift();
+  return kept;
+}
+
 /** The entry that covers these words, if the person allowed one. A prefix covers longer commands with the same first words. */
 function allowed(entry: readonly MacAllowEntry[], prefix: readonly string[]): MacAllowEntry | undefined {
   if (prefix.length === 0) return undefined;
   return entry.find(one => one.prefix.length > 0 && one.prefix.length <= prefix.length && one.prefix.every((word, index) => word === prefix[index]));
+}
+
+/**
+ * First words that must never be remembered: a wrapper or an interpreter with no script of its own
+ * would hand over every later command of that shape. Codex has the same list (`BANNED_PREFIX_
+ * SUGGESTIONS` in exec_policy.rs): "sudo", "env", "xargs", a bare "python"/"bash", "rm".
+ */
+const NEVER_REMEMBER = new Set(["sudo", "doas", "su", "env", "xargs", "nohup", "time", "timeout", "nice", "eval", "exec", "command", "builtin", "rm"]);
+
+/** Programs that run whatever they are handed, so only a prefix naming the script may be remembered. */
+const INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "deno", "bun", "perl", "ruby", "php", "lua", "osascript"]);
+
+/**
+ * Whether "always allow <these words>" may be offered. A prefix that already writes is enough
+ * (`npm test`, `mkdir -p`, `git commit`); a wrapper or an interpreter without a script is not,
+ * because the next command after the same words could be anything.
+ */
+function rememberable(prefix: readonly string[]): boolean {
+  const name = (prefix[0] ?? "").replace(/^.*\//, "");
+  if (name === "" || NEVER_REMEMBER.has(name)) return false;
+  const second = prefix[1];
+  if (INTERPRETERS.has(name) && (second === undefined || second.startsWith("-"))) return false;
+  // `git -C x` and `git -c k=v` are not the subcommand; without one, the next word decides everything.
+  if (name === "git" && (second === undefined || second.startsWith("-"))) return false;
+  return true;
 }
 
 /**
@@ -116,7 +163,7 @@ export function decideApproval(
   const allow = options.allow ?? [];
   const whole = commandPrefix(command);
   const parts = shellParts(command);
-  if (parts === null || parts.length === 0) return { kind: "ask", once: ONCE, prefix: whole.text };
+  if (parts === null || parts.length === 0) return { kind: "ask", once: ONCE, prefix: whole.text, prefixWords: whole.words };
   const judged = parts.map(part => ({ reads: readOnly(part), prefix: commandPrefix(part) }));
   if (judged.every(one => one.reads)) return { kind: "auto", because: "every part of it only reads" };
   const writes = judged.filter(one => !one.reads);
@@ -126,10 +173,13 @@ export function decideApproval(
   }
   const first = uncovered[0]!;
   // Nothing to remember when the words do not name a command (`> out`, an odd segment).
-  if (first.prefix.text === "") return { kind: "ask", once: ONCE, prefix: whole.text };
+  if (first.prefix.text === "") return { kind: "ask", once: ONCE, prefix: whole.text, prefixWords: whole.words };
   // A prefix that still reads as read-only means the danger is in the words it does NOT cover
   // (`find . -delete`: `find .` alone only reads). Remembering it would open the door for any
   // other flag after the same words, so those get one run and no standing grant.
-  if (readOnly(first.prefix.text)) return { kind: "ask", once: ONCE, prefix: first.prefix.text };
-  return { kind: "ask", once: ONCE, remember: `${REMEMBER} ${first.prefix.text}`, prefix: first.prefix.text };
+  const candidate = first.prefix.words;
+  if (readOnly(first.prefix.text) || !rememberable(candidate)) {
+    return { kind: "ask", once: ONCE, prefix: first.prefix.text, prefixWords: candidate };
+  }
+  return { kind: "ask", once: ONCE, remember: `${REMEMBER} ${first.prefix.text}`, prefix: first.prefix.text, prefixWords: candidate };
 }

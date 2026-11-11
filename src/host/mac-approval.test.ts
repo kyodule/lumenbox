@@ -14,6 +14,7 @@ import {
   decideApproval,
   type MacAllowEntry,
   readOnly,
+  rememberPrefix,
   shellParts,
 } from "./mac-approval.ts";
 
@@ -39,11 +40,14 @@ test("npm test && rm -rf build always asks: the second part decides it", () => {
   assert.equal(fresh.kind, "ask");
   assert.equal(fresh.kind === "ask" ? fresh.prefix : "", "npm test", "the first part it does not cover is the one offered");
 
-  // Acceptance 3: with `npm test` remembered, the dialog is about the part it does NOT cover.
+  // Acceptance 3, as tightened by E4: with `npm test` remembered the dialog is about the part it
+  // does NOT cover (`rm -rf`), and "always allow" is no longer offered for it — `rm` is one of the
+  // prefixes a standing grant would turn into "delete anything, anywhere".
   const carried = decideApproval("npm test && rm -rf build", { ...ask, allow: allow("npm test") });
   assert.equal(carried.kind, "ask", "the allowed prefix must not carry the second command");
   assert.equal(carried.kind === "ask" ? carried.prefix : "", "rm -rf");
-  assert.equal(carried.kind === "ask" ? carried.remember : "", "Always allow rm -rf");
+  assert.equal(carried.kind === "ask" ? carried.remember : "x", undefined, "rm is never rememberable");
+  assert.deepEqual(carried.kind === "ask" ? carried.prefixWords : [], ["rm", "-rf"]);
 });
 
 test("an allowed prefix does not carry the next part: npm test && npm run lint still asks", () => {
@@ -133,4 +137,86 @@ test("a write hidden in a flag of a reading subcommand is one run, not a prefix:
   const decision = decideApproval("git diff --output=/tmp/out.txt", { ...ask, allow: [] });
   assert.equal(decision.kind, "ask");
   assert.equal(decision.kind === "ask" ? decision.remember : "x", undefined, `"git diff" alone reads; the write is in the flag`);
+});
+
+test("always allow is stored as words and covers the next command: mkdir -p then mkdir -p elsewhere", () => {
+  const first = decideApproval("mkdir -p /tmp/a", { ...ask, allow: [] });
+  assert.equal(first.kind, "ask");
+  assert.deepEqual(first.kind === "ask" ? first.prefixWords : [], ["mkdir", "-p"]);
+  const allow = rememberPrefix([], first.kind === "ask" ? first.prefixWords : [], "2026-11-11T00:00:00.000Z");
+  assert.equal(allow.length, 1);
+  assert.deepEqual(allow[0]!.prefix, ["mkdir", "-p"]);
+  const second = decideApproval("mkdir -p /tmp/b", { ...ask, allow });
+  assert.equal(second.kind, "auto", "the dialog's promise has to hold for the next command");
+});
+
+test("remembering the same prefix twice does not duplicate it, and the 51st pushes the first out", () => {
+  const once = rememberPrefix([], ["npm", "test"], "t1");
+  const twice = rememberPrefix(once, ["npm", "test"], "t2");
+  assert.equal(twice.length, 1, "one entry, refreshed rather than repeated");
+  assert.equal(twice[0]!.at, "t2");
+  let allow: MacAllowEntry[] = [];
+  for (let index = 0; index < 51; index += 1) allow = rememberPrefix(allow, ["cmd", String(index)], "t");
+  assert.equal(allow.length, 50);
+  assert.deepEqual(allow[0]!.prefix, ["cmd", "1"], "the oldest entry is the one that went");
+  assert.deepEqual(allow[49]!.prefix, ["cmd", "50"]);
+});
+
+test("a quoted argument with a space stays one word: the prefix is compared as words, never split", () => {
+  const first = decideApproval('grp "a b"', { ...ask, allow: [] });
+  assert.equal(first.kind, "ask");
+  assert.deepEqual(first.kind === "ask" ? first.prefixWords : [], ["grp", "a b"]);
+  const allow = rememberPrefix([], first.kind === "ask" ? first.prefixWords : [], "t");
+  const again = decideApproval('grp "a b" x', { ...ask, allow });
+  assert.equal(again.kind, "auto");
+  assert.equal(decideApproval('grp "a  b" x', { ...ask, allow }).kind, "ask", "two spaces is another word");
+});
+
+test("a wrapper or an interpreter with no script of its own is never offered as a prefix", () => {
+  const noRemember = [
+    "sudo ls",
+    "doas ls",
+    "su -",
+    "env FOO=1 ls",
+    "xargs rm",
+    "nohup ls",
+    "time ls",
+    "timeout 5 ls",
+    "nice ls",
+    "eval ls",
+    "exec ls",
+    "command ls",
+    "builtin cd /",
+    "sh",
+    "bash -lc ls",
+    "zsh -c ls",
+    "python3 -c 1",
+    "node -e 1",
+    "perl -e 1",
+    "ruby -e 1",
+    "osascript -e 1",
+    "rm -rf x",
+    "git",
+    "git -C x commit",
+    "git -c core.pager=less status",
+  ];
+  for (const command of noRemember) {
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "ask", command);
+    assert.equal(decision.kind === "ask" ? decision.remember : "x", undefined, `${command} must not offer "always allow"`);
+  }
+});
+
+test("the prefixes that carry the command themselves stay rememberable", () => {
+  const rememberable: [string, string][] = [
+    ["npm test", "npm test"],
+    ["mkdir -p /tmp/a", "mkdir -p"],
+    ["git commit -m x", "git commit"],
+    ["python3 scripts/x.py", "python3 scripts/x.py"],
+  ];
+  for (const [command, prefix] of rememberable) {
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "ask", command);
+    assert.equal(decision.kind === "ask" ? decision.remember : "", `Always allow ${prefix}`, command);
+  }
 });

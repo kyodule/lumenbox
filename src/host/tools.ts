@@ -3511,7 +3511,7 @@ export async function dispatchTool(
       if (granted.length > 0) context.policy?.taint.mark(context.turnId ?? "", "vault");
 
       try {
-        const result = await context.hostRunner.run(command, secrets.env, callFor(context).call).finally(() => { erased = secrets.finish().erased; });
+        const result = await context.hostRunner.run(command, secrets.env, callFor(context).call, context.agent.profile.name).finally(() => { erased = secrets.finish().erased; });
         const parts = [
           result.stdout.trim() !== "" ? result.stdout : "(no stdout)",
           result.stderr.trim() !== "" ? `stderr:\n${result.stderr}` : "",

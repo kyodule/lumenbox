@@ -717,7 +717,6 @@ const HOST_EXEC_APPROVAL_MS = 120_000;
 // Written by this version, and what tells a pre-v2 file (where "always" meant "the server
 // already asked") from this version's own choice of full access.
 const HOST_EXEC_SCHEMA = 2;
-const HOST_EXEC_ALLOW_MAX = 50;
 const hostExecQueue = [];
 const hostExecSeen = new Set();
 let hostExecRequest = null;
@@ -753,7 +752,7 @@ function hostExecAllow(list) {
     if (prefix.length === 0) continue;
     entries.push({ prefix, at: typeof one.at === "string" ? one.at : "" });
   }
-  return entries.slice(-HOST_EXEC_ALLOW_MAX);
+  return entries;
 }
 
 /**
@@ -806,18 +805,19 @@ function setHostExecMode(mode) {
   watchHostExec();
 }
 
-/** Remembers the words of a command the person allowed from now on. False when it was already there. */
-function rememberHostExecPrefix(prefix) {
-  if (!Array.isArray(prefix) || prefix.length === 0) return false;
-  const text = prefix.join(" ");
-  const allow = hostExecAllow(readHostExec().allow);
-  if (allow.some(one => one.prefix.join(" ") === text)) return false;
-  allow.push({ prefix, at: new Date().toISOString() });
-  while (allow.length > HOST_EXEC_ALLOW_MAX) allow.shift();
-  editHostExec(raw => ({ ...raw, allow }));
-  log(`host exec: allowed from now on: ${text}`);
+/**
+ * Remembers the words of a command the person allowed from now on. The list comes back from the
+ * runner, which owns the dedupe and the cap: this process only carries it to the file. Throws when
+ * the list could not be made — the caller runs the command anyway and says so in the audit.
+ */
+async function rememberHostExecPrefix(prefixWords) {
+  if (!Array.isArray(prefixWords) || prefixWords.length === 0) throw new Error("no prefix words to remember");
+  const config = readHostExec();
+  const answer = await runHostExecChild({ phase: "remember", allow: config.allow, prefixWords, at: new Date().toISOString() }, 30_000);
+  if (!Array.isArray(answer.allow)) throw new Error(answer.refused ?? "the Mac runner returned no allow list");
+  editHostExec(raw => ({ ...raw, allow: hostExecAllow(answer.allow) }));
+  log(`host exec: allowed from now on: ${prefixWords.join(" ")}`);
   updateTrayMenu();
-  return true;
 }
 
 function forgetHostExecCommands() {
@@ -947,6 +947,7 @@ async function handleHostExecJob(job) {
 
   let answeredMs = null;
   let remembered = null;
+  let rememberError = null;
   let decisionName = decision.kind;
   if (decision.kind === "ask") {
     const asked = await askHostExec(job, decision);
@@ -956,7 +957,15 @@ async function handleHostExecJob(job) {
       return { refused: asked.decision === "timeout" ? "no answer on the Mac within 2 minutes" : "the person declined on the Mac" };
     }
     decisionName = "approved";
-    if (asked.remember && rememberHostExecPrefix(decision.prefix)) remembered = decision.prefix;
+    if (asked.remember) {
+      try {
+        await rememberHostExecPrefix(decision.prefixWords);
+        remembered = decision.prefixWords;
+      } catch (err) {
+        rememberError = err.message;
+        log(`host exec: could not remember "${(decision.prefixWords ?? []).join(" ")}": ${err.message}; it will ask again`);
+      }
+    }
     if (job.generation !== hostExecGeneration) {
       audit({ decision: "stale", answeredMs });
       return { refused: "the connection to the server changed while the Mac was asking" };
@@ -964,7 +973,7 @@ async function handleHostExecJob(job) {
   }
   log(`host exec: running for ${job.agent ?? "an agent"} (${decisionName}): ${job.command.slice(0, 200)}`);
   const answer = await runHostExecChild({ phase: "run", command: job.command, timeoutMs: job.timeoutMs }, (job.timeoutMs || 300_000) + 30_000);
-  audit({ decision: decisionName, prefix: remembered, remember: remembered !== null, answeredMs, code: answer.result?.code ?? null, refused: answer.refused ?? null });
+  audit({ decision: decisionName, prefix: remembered, remember: remembered !== null, ...(rememberError !== null ? { rememberError } : {}), answeredMs, code: answer.result?.code ?? null, refused: answer.refused ?? null });
   return answer;
 }
 

@@ -7,6 +7,9 @@
  *
  *   {phase: "decide", command, mode, allow}   → src/host/mac-approval.ts's answer, verbatim:
  *                                               {kind: "auto"|"ask"|"refuse", ...}.
+ *   {phase: "remember", allow, prefixWords, at} → {allow: [...]}, the list after this prefix is
+ *                                               added once (dedupe and the 50-entry cap are the
+ *                                               decision module's, not the shell's).
  *   {phase: "run", command, cwd?, timeoutMs?, maxOutputBytes?}
  *                                             → {result: {stdout, stderr, code, timedOut,
  *                                               truncatedBytes}}, or {refused: "..."} when it
@@ -34,6 +37,14 @@ interface DecideJob {
   command: string;
   mode: MacApprovalMode;
   allow?: MacAllowEntry[];
+}
+
+interface RememberJob {
+  phase: "remember";
+  allow?: MacAllowEntry[];
+  /** The words to allow from now on, as words: splitting a text back apart breaks a quoted argument with a space. */
+  prefixWords?: string[];
+  at?: string;
 }
 
 interface RunJob {
@@ -140,21 +151,33 @@ function runCommand(job: RunJob): Promise<RunResult> {
   });
 }
 
+/** A hand-edited allow list is the person's own file: a broken entry is ignored, not fatal. */
+function allowOf(job: { allow?: MacAllowEntry[] }): MacAllowEntry[] {
+  return (Array.isArray(job.allow) ? job.allow : []).filter(
+    (one: unknown): one is MacAllowEntry =>
+      typeof one === "object" && one !== null && Array.isArray((one as MacAllowEntry).prefix) && (one as MacAllowEntry).prefix.every(word => typeof word === "string")
+  );
+}
+
 async function main(): Promise<void> {
   // Started as node by the shell; a command that launches an Electron app must not inherit that.
   delete process.env.ELECTRON_RUN_AS_NODE;
   const appRoot = process.env.LUMENBOX_APP_ROOT ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const job = JSON.parse(await readStdin()) as DecideJob | RunJob;
+  const job = JSON.parse(await readStdin()) as DecideJob | RememberJob | RunJob;
+
+  if (job.phase === "remember") {
+    const module = await import(pathToFileURL(join(appRoot, "src", "host", "mac-approval.ts")).href);
+    const prefixWords = (Array.isArray(job.prefixWords) ? job.prefixWords : []).filter(word => typeof word === "string" && word !== "");
+    if (prefixWords.length === 0) throw new Error("job.prefixWords is required");
+    const at = typeof job.at === "string" && job.at !== "" ? job.at : new Date().toISOString();
+    process.stdout.write(JSON.stringify({ allow: module.rememberPrefix(allowOf(job), prefixWords, at) }));
+    return;
+  }
   if (typeof job.command !== "string" || job.command.trim() === "") throw new Error("job.command is required");
 
   if (job.phase === "decide") {
     const module = await import(pathToFileURL(join(appRoot, "src", "host", "mac-approval.ts")).href);
-    // A hand-edited allow list is the person's own file: a broken entry is ignored, not fatal.
-    const allow = (Array.isArray(job.allow) ? job.allow : []).filter(
-      (one: unknown): one is MacAllowEntry =>
-        typeof one === "object" && one !== null && Array.isArray((one as MacAllowEntry).prefix) && (one as MacAllowEntry).prefix.every(word => typeof word === "string")
-    );
-    const decision = module.decideApproval(job.command, { mode: job.mode, allow });
+    const decision = module.decideApproval(job.command, { mode: job.mode, allow: allowOf(job) });
     process.stdout.write(JSON.stringify(decision));
     return;
   }
@@ -162,7 +185,7 @@ async function main(): Promise<void> {
     process.stdout.write(JSON.stringify({ result: await runCommand(job) }));
     return;
   }
-  throw new Error("job.phase must be decide or run");
+  throw new Error("job.phase must be decide, remember or run");
 }
 
 main().catch((error: unknown) => {

@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { test } from "node:test";
-import { DesktopHostRunner } from "./host-runner.ts";
+import { DesktopHostRunner, type HostRunner } from "./host-runner.ts";
+import { dispatchTool, type ToolContext } from "./tools.ts";
 
 function seat() {
   const frames: { type: string; id: string; agent: string | null; command: string; timeoutMs: number }[] = [];
@@ -124,4 +125,26 @@ test("serve answers only its two routes, admin only, and the stream's close deta
 
   req.emit("close");
   assert.equal(runner.enabled, false, "the stream closing is the Mac going away");
+});
+
+test("the agent's name reaches the Mac through the tool dispatch, which is where it was missing", async () => {
+  // The direct runner call below has always carried the name; the bug was that RunOnHost's
+  // dispatch never passed it, so the dialog said "An agent" and the audit said `"agent":null`.
+  const calls: unknown[][] = [];
+  const stub = {
+    enabled: true,
+    refusesSecrets: false,
+    run: async (...args: unknown[]) => {
+      calls.push(args);
+      return { stdout: "ok\n", stderr: "", code: 0, timedOut: false, truncatedBytes: 0 };
+    },
+  } as unknown as HostRunner;
+  const context = {
+    agent: { id: "agent-1", profile: { name: "Ada" } } as unknown as ToolContext["agent"],
+    hostRunner: stub,
+  } as ToolContext;
+  const outcome = await dispatchTool("RunOnHost", { command: "pwd" }, context);
+  assert.notEqual(outcome.isError, true, outcome.text);
+  assert.equal(calls[0]?.[0], "pwd");
+  assert.equal(calls[0]?.[3], "Ada", "the 4th argument is the agent name the Mac's dialog and its audit show");
 });
