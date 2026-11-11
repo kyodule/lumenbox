@@ -47,8 +47,8 @@ export type MacApprovalDecision =
   | { kind: "refuse"; because: string };
 
 /** The dialog's buttons, in the person's language. */
-const ONCE = "执行一次";
-const REMEMBER = "一直允许";
+const ONCE = "Run once";
+const REMEMBER = "Always allow";
 
 /** True when the command only reads, by the same judgement the server's approval card uses. */
 export function readOnly(command: string): boolean {

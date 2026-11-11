@@ -708,7 +708,8 @@ function startUse(use) {
 
 // LUMENBOX-HOSTEXEC-PATCH v2 (fork kyodule/lumenbox): run the server's RunOnHost commands on this
 // Mac, after this Mac asks the person in front of it. ~/.agentbox/host-exec.json is this Mac's own
-// word: mode off | ask | always, an optional directory, and the command prefixes allowed so far.
+// word: mode off | ask | always, and the command prefixes allowed so far. There is no directory
+// setting: a command starts in the person's home directory, as it would in their terminal.
 // The server only carries.
 const HOST_EXEC_FILE = path.join(process.env.AGENTBOX_HOME || path.join(os.homedir(), ".agentbox"), "host-exec.json");
 const HOST_EXEC_RUNNER = path.join(__dirname, "host-exec-runner.ts");
@@ -755,9 +756,19 @@ function hostExecAllow(list) {
   return entries.slice(-HOST_EXEC_ALLOW_MAX);
 }
 
+/**
+ * `cwd` and `network` are no longer settings: nothing reads them, and a key nobody reads only
+ * tells the person there is still something to configure. Dropped on every write.
+ */
+function withoutRetired(raw) {
+  if (raw === null || typeof raw !== "object") return {};
+  const { cwd, network, ...kept } = raw;
+  return kept;
+}
+
 function readHostExec() {
   hostExecError = null;
-  if (!fs.existsSync(HOST_EXEC_FILE)) return { mode: "off", cwd: null, allow: [] };
+  if (!fs.existsSync(HOST_EXEC_FILE)) return { mode: "off", allow: [] };
   try {
     const raw = JSON.parse(fs.readFileSync(HOST_EXEC_FILE, "utf8"));
     let mode = raw.mode === "ask" || raw.mode === "always" ? raw.mode : "off";
@@ -765,26 +776,25 @@ function readHostExec() {
     // "run anything". It becomes "ask", in writing, once — the person's next choice is theirs.
     if (raw.schema !== HOST_EXEC_SCHEMA && mode === "always") {
       mode = "ask";
-      writeHostExec({ ...raw, mode, schema: HOST_EXEC_SCHEMA });
+      writeHostExec({ ...withoutRetired(raw), mode, schema: HOST_EXEC_SCHEMA });
       hostExecAudit({ id: null, agent: null, command: null, mode, decision: "migrated", from: "always" });
       log("host exec: mode migrated always → ask, because the server no longer asks");
     }
-    const cwd = typeof raw.cwd === "string" && raw.cwd.trim() !== "" ? raw.cwd.trim() : null;
-    return { mode, cwd, allow: hostExecAllow(raw.allow) };
+    return { mode, allow: hostExecAllow(raw.allow) };
   } catch (err) {
     // A broken file is off, and the tray says so: it must never become a door left open.
     hostExecError = `${HOST_EXEC_FILE}: ${err.message}`;
-    return { mode: "off", cwd: null, allow: [] };
+    return { mode: "off", allow: [] };
   }
 }
 
-/** Writes one field into the file and keeps everything else, including a "network" left by an older version. */
+/** Writes one field into the file and keeps everything else, minus the keys this version retired. */
 function editHostExec(change) {
   let raw = {};
   try {
     raw = JSON.parse(fs.readFileSync(HOST_EXEC_FILE, "utf8"));
   } catch {}
-  const next = change(raw) ?? raw;
+  const next = withoutRetired(change(raw) ?? raw);
   next.schema = HOST_EXEC_SCHEMA;
   writeHostExec(next);
   return next;
@@ -821,7 +831,7 @@ function hostExecTrayItems() {
   const choose = mode => () => setHostExecMode(mode);
   const where = hostExecError
     ? `Config error, see ${HOST_EXEC_FILE}`
-    : `${config.allow.length} allowed ${config.allow.length === 1 ? "command" : "commands"}${config.cwd !== null ? ` · from ${config.cwd}` : " · from your home directory"}`;
+    : `${config.allow.length} allowed ${config.allow.length === 1 ? "command" : "commands"}`;
   return [
     { type: "separator" },
     { label: "Mac execution", enabled: false },
@@ -953,7 +963,7 @@ async function handleHostExecJob(job) {
     }
   }
   log(`host exec: running for ${job.agent ?? "an agent"} (${decisionName}): ${job.command.slice(0, 200)}`);
-  const answer = await runHostExecChild({ phase: "run", command: job.command, ...(config.cwd !== null ? { cwd: config.cwd } : {}), timeoutMs: job.timeoutMs }, (job.timeoutMs || 300_000) + 30_000);
+  const answer = await runHostExecChild({ phase: "run", command: job.command, timeoutMs: job.timeoutMs }, (job.timeoutMs || 300_000) + 30_000);
   audit({ decision: decisionName, prefix: remembered, remember: remembered !== null, answeredMs, code: answer.result?.code ?? null, refused: answer.refused ?? null });
   return answer;
 }
@@ -972,9 +982,9 @@ async function askHostExec(job, decision) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HOST_EXEC_APPROVAL_MS);
   const shownAt = Date.now();
-  const buttons = decision.remember !== undefined ? [decision.once, decision.remember, "拒绝"] : [decision.once, "拒绝"];
+  const buttons = decision.remember !== undefined ? [decision.once, decision.remember, "Decline"] : [decision.once, "Decline"];
   const decline = buttons.length - 1;
-  const remembered = decision.remember !== undefined ? `\n\n「${decision.remember}」 will run later commands that begin with these words without asking.` : "";
+  const remembered = decision.remember !== undefined ? `\n\n"Always allow" runs later commands that begin with these words without asking.` : "";
   try {
     const { response } = await dialog.showMessageBox(mainWindow, {
       type: "warning",

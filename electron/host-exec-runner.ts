@@ -19,6 +19,9 @@
  * There is no sandbox and no working-directory rule here, on purpose. The command runs through
  * the person's own login shell, as them, from their home directory, so `command -v codex` finds
  * what their terminal finds. What stops a command is the dialog before it, and nothing else.
+ * `cwd` stays in the run job, though: it is how a caller pins a directory (a test, or a future
+ * setting), and main.cjs simply never sends one — the start is the person's home, as in their
+ * own terminal.
  */
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
@@ -89,6 +92,7 @@ function runCommand(job: RunJob): Promise<RunResult> {
   const timeoutMs = Math.min(Math.max(Number(job.timeoutMs) || 300_000, 1_000), 1_800_000);
   const cap = Math.min(Math.max(Number(job.maxOutputBytes) || 200_000, 1_000), 5_000_000);
   const shell = process.env.SHELL || "/bin/zsh";
+  // The protocol may name a directory; the shell sends none, so this is the person's home.
   const cwd = typeof job.cwd === "string" && job.cwd.trim() !== "" ? expandHome(job.cwd.trim()) : homedir();
   return new Promise(resolve => {
     const child = spawn(shell, ["-lc", job.command], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true });

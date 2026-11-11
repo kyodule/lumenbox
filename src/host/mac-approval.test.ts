@@ -43,7 +43,7 @@ test("npm test && rm -rf build always asks: the second part decides it", () => {
   const carried = decideApproval("npm test && rm -rf build", { ...ask, allow: allow("npm test") });
   assert.equal(carried.kind, "ask", "the allowed prefix must not carry the second command");
   assert.equal(carried.kind === "ask" ? carried.prefix : "", "rm -rf");
-  assert.equal(carried.kind === "ask" ? carried.remember : "", "一直允许 rm -rf");
+  assert.equal(carried.kind === "ask" ? carried.remember : "", "Always allow rm -rf");
 });
 
 test("an allowed prefix does not carry the next part: npm test && npm run lint still asks", () => {
@@ -91,7 +91,7 @@ test("the remembered prefix is the first two words, and is what the dialog offer
   assert.deepEqual(commandPrefix("ls"), { words: ["ls"], text: "ls" });
   const decision = decideApproval("git commit -m x", { ...ask, allow: [] });
   assert.equal(decision.kind, "ask");
-  assert.equal(decision.kind === "ask" ? decision.remember : "", "一直允许 git commit");
+  assert.equal(decision.kind === "ask" ? decision.remember : "", "Always allow git commit");
 });
 
 test("the parts are upstream's split, so the read-only judgement and this one see the same segments", () => {
@@ -125,7 +125,7 @@ test("a prefix whose own words already write can be remembered: sed -i, sort -o,
     const decision = decideApproval(command, { ...ask, allow: [] });
     assert.equal(decision.kind, "ask", command);
     assert.equal(decision.kind === "ask" ? decision.prefix : "", prefix, command);
-    assert.equal(decision.kind === "ask" ? decision.remember : "", `一直允许 ${prefix}`, command);
+    assert.equal(decision.kind === "ask" ? decision.remember : "", `Always allow ${prefix}`, command);
   }
 });
 
