@@ -17,6 +17,10 @@ test("commands that only read are said to, and everything uncertain is not", () 
     "echo 'a > b in quotes' | tr a-z A-Z",
     "git branch -a",
     "git stash list",
+    "sort notes.txt",
+    "xxd in.bin",
+    "rg TODO src",
+    "mount",
   ]) {
     assert.deepEqual(classifyShell(command), { readOnly: true }, command);
   }
@@ -39,6 +43,19 @@ test("commands that only read are said to, and everything uncertain is not", () 
     ["ls 'unterminated", /unbalanced quotes/],
     ["awk '{ system(\"rm x\") }' file", /awk/],
     ["echo hi | tee log", /tee/],
+    ["sort -o /tmp/out.txt in.txt", /sort -o/],
+    ["sort -ro /tmp/out.txt in.txt", /sort -o/],
+    ["sort --output=/tmp/out.txt in.txt", /sort -o/],
+    ["sort --compress-program=/tmp/evil in.txt", /sort --compress-program/],
+    ["xxd in.bin out.hex", /xxd writing a file/],
+    ["rg --pre ./evil x", /rg --pre/],
+    ["rg --pre=./evil x", /rg --pre/],
+    ["rg --pre-glob '*.ts' TODO src", /rg --pre/],
+    ["ag --pre ./evil x", /ag --pre/],
+    ["git diff --output=/tmp/out.txt", /git --output/],
+    ["git log --output /tmp/out.txt", /git --output/],
+    ["mount /dev/disk1s1 /Volumes/x", /mount attaching a filesystem/],
+    ["mount -a", /mount attaching a filesystem/],
     ["", /empty/],
   ];
   for (const [command, why] of notReadOnly) {

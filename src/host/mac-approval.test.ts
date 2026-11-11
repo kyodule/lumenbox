@@ -104,3 +104,33 @@ test("every part is either read-only or allowed: ls && npm test runs once npm te
   assert.equal(decideApproval("ls && npm test", { ...ask, allow: allow("npm test") }).kind, "auto");
   assert.equal(decideApproval("ls && npm test", { ...ask, allow: [] }).kind, "ask");
 });
+test("a prefix that still reads as read-only gets one run and no standing grant: find . -delete", () => {
+  for (const command of ["find . -delete", "find . -name '*.log' -delete"]) {
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "ask", command);
+    assert.equal(decision.kind === "ask" ? decision.remember : "x", undefined,
+      `${command}: "find ." alone only reads, so remembering it would hand over every flag after it`);
+  }
+});
+
+test("a prefix whose own words already write can be remembered: sed -i, sort -o, git push, npm test", () => {
+  const cases: [string, string][] = [
+    ["sed -i s/a/b/ f", "sed -i"],
+    ["sort -o out in", "sort -o"],
+    ["git push origin main", "git push"],
+    ["npm test", "npm test"],
+    ["rg --pre ./evil x", "rg --pre"],
+  ];
+  for (const [command, prefix] of cases) {
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "ask", command);
+    assert.equal(decision.kind === "ask" ? decision.prefix : "", prefix, command);
+    assert.equal(decision.kind === "ask" ? decision.remember : "", `一直允许 ${prefix}`, command);
+  }
+});
+
+test("a write hidden in a flag of a reading subcommand is one run, not a prefix: git diff --output", () => {
+  const decision = decideApproval("git diff --output=/tmp/out.txt", { ...ask, allow: [] });
+  assert.equal(decision.kind, "ask");
+  assert.equal(decision.kind === "ask" ? decision.remember : "x", undefined, `"git diff" alone reads; the write is in the flag`);
+});

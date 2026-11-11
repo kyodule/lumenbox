@@ -38,6 +38,8 @@ function guarded(name: string, args: readonly string[]): string | undefined {
     case "gawk":
       return args.some(arg => /system\s*\(|>\s*"|>\s*'|\|\s*"/.test(arg)) ? "awk writing or spawning" : undefined;
     case "git": {
+      // `--output` writes a file on any subcommand, including the reading ones.
+      if (has(/^--output(=|$)/)) return "git --output";
       const sub = args.find(arg => !arg.startsWith("-"));
       const reading = new Set(["status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "rev-parse", "describe", "shortlog", "cat-file", "grep", "reflog", "count-objects", "config"]);
       if (sub === undefined) return "git with no subcommand";
@@ -72,12 +74,25 @@ function guarded(name: string, args: readonly string[]): string | undefined {
     }
     case "systemctl":
       return args.some(arg => /^(status|list-units|list-unit-files|is-active|is-enabled|show|cat)$/.test(arg)) && !args.some(arg => /^(start|stop|restart|reload|enable|disable|mask|unmask|edit|daemon-reload)$/.test(arg)) ? undefined : "systemctl that changes state";
+    case "sort":
+      // `sort -o` writes the file it is given, and `--compress-program` runs it.
+      return has(/^--compress-program(=|$)/) ? "sort --compress-program" : has(/^-[a-zA-Z]*o|^--output(=|$)/) ? "sort -o" : undefined;
+    case "xxd":
+      // `xxd in out` writes the second path; with no output path it only prints.
+      return args.filter(arg => !arg.startsWith("-")).length >= 2 ? "xxd writing a file" : undefined;
+    case "rg":
+    case "ag":
+      // `--pre` turns its argument into a program to run; `--pre-glob` rides along with it.
+      return has(/^--pre/) ? `${name} --pre` : undefined;
+    case "mount":
+      // No argument lists what is mounted; anything else attaches a filesystem, and `-a` attaches all.
+      return args.filter(arg => !arg.startsWith("-")).length > 0 || has(/^-[a-zA-Z]*a/) ? "mount attaching a filesystem" : undefined;
     default:
       return undefined;
   }
 }
 
-const NEVER = /(^|[\s;&|(])(sudo|doas|su|eval|exec|xargs|source|sh|bash|zsh|dash|ksh|fish|env|nohup|timeout|watch|nice|ionice|command|builtin|time|script|tee|dd|rm|mv|cp|chmod|chown|chgrp|ln|mkdir|rmdir|touch|truncate|shred|kill|pkill|killall|curl|wget|ssh|scp|rsync|ftp|sftp|nc|ncat|telnet|apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo|go|make|tar|zip|unzip|gzip|gunzip|crontab|mkfs|fdisk|mount|umount|reboot|shutdown|halt|poweroff|passwd|useradd|userdel|usermod|iptables|nft|ufw)(\s|$)/;
+const NEVER = /(^|[\s;&|(])(sudo|doas|su|eval|exec|xargs|source|sh|bash|zsh|dash|ksh|fish|env|nohup|timeout|watch|nice|ionice|command|builtin|time|script|tee|dd|rm|mv|cp|chmod|chown|chgrp|ln|mkdir|rmdir|touch|truncate|shred|kill|pkill|killall|curl|wget|ssh|scp|rsync|ftp|sftp|nc|ncat|telnet|apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo|go|make|tar|zip|unzip|gzip|gunzip|crontab|mkfs|fdisk|umount|reboot|shutdown|halt|poweroff|passwd|useradd|userdel|usermod|iptables|nft|ufw)(\s|$)/;
 
 /** Splits on |, ||, &&, ;, and newlines — outside quotes. Null when the quoting is unbalanced. */
 export function segments(command: string): string[] | null {

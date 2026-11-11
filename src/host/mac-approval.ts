@@ -16,7 +16,9 @@
  *   - **A prefix is offered only when the words are the command.** A substitution, a redirection or
  *     a `VAR=value` prefix puts in the line something its words do not show, so those get "run
  *     once" and no "always allow": remembering `echo` from `echo $(whoami)` would hand `echo` away
- *     for a later, different substitution.
+ *     for a later, different substitution. The same goes for a prefix that is itself still
+ *     read-only (`find .` from `find . -delete`): the danger is in the flags it does not cover, so
+ *     remembering the words would let any other flag after them through.
  *
  * Nothing here is a sandbox. The person's protection is the dialog and the prefixes they chose,
  * which is the trade the design takes: commands run as them, where they could type them.
@@ -97,7 +99,8 @@ function allowed(entry: readonly MacAllowEntry[], prefix: readonly string[]): Ma
  *   2. a line that cannot be read as plain commands — ask, and only "run once".
  *   3. every part only reads — run it.
  *   4. every part is read-only or allowed from before — run it.
- *   5. otherwise — ask, offering to remember the first part that was not covered.
+ *   5. otherwise — ask, offering to remember the first part that was not covered, unless those
+ *      words are themselves read-only (see above).
  *
  * The one invariant: one unsafe part makes the whole line ask. An allowed prefix is never a pass
  * for a part it does not itself match.
@@ -124,5 +127,9 @@ export function decideApproval(
   const first = uncovered[0]!;
   // Nothing to remember when the words do not name a command (`> out`, an odd segment).
   if (first.prefix.text === "") return { kind: "ask", once: ONCE, prefix: whole.text };
+  // A prefix that still reads as read-only means the danger is in the words it does NOT cover
+  // (`find . -delete`: `find .` alone only reads). Remembering it would open the door for any
+  // other flag after the same words, so those get one run and no standing grant.
+  if (readOnly(first.prefix.text)) return { kind: "ask", once: ONCE, prefix: first.prefix.text };
   return { kind: "ask", once: ONCE, remember: `${REMEMBER} ${first.prefix.text}`, prefix: first.prefix.text };
 }
