@@ -24,7 +24,7 @@
  * which is the trade the design takes: commands run as them, where they could type them.
  */
 
-import { classifyShell, segments, stripDiscardRedirects, words } from "./shell-readonly.ts";
+import { activeText, classifyShell, segments, stripDiscardRedirects, unmodelledSyntax, wordSpans } from "./shell-readonly.ts";
 
 /** The Mac's own switch, as `~/.agentbox/host-exec.json` spells it. */
 export type MacApprovalMode = "off" | "ask" | "always";
@@ -73,18 +73,15 @@ const SHELL_KEYWORDS = new Set(["for", "while", "until", "if", "case", "select",
 export function shellParts(command: string): string[] | null {
   // What is thrown away is not part of the command, and `2>&1` would otherwise split on its `&`.
   const text = stripDiscardRedirects(command);
-  // `$(...)` and backticks run a command named nowhere in the words. They stay active inside
-  // double quotes (and `classifyShell` is fooled by exactly that: `cat "$(rm x)"` reads as a
-  // `cat`), so this check runs before quotes are stripped — single quotes only, where they are
-  // literal.
-  if (/\$\(|`/.test(text.replace(/'[^']*'/g, ""))) return null;
-  // A redirection writes somewhere that is not a word of the command, and `$( )`-free or not,
-  // no prefix covers it. Outside quotes only: `grep "a>b"` writes nothing.
-  if (/[<>]/.test(text.replace(/'(?:[^']*)'|"(?:[^"\\]|\\.)*"/g, ""))) return null;
+  // One list of syntax this file does not model, shared with the read-only judgement: a subshell,
+  // a zsh qualifier, an ANSI-C quote, a brace expansion, a substitution.
+  if (unmodelledSyntax(text) !== undefined) return null;
+  // A redirection writes somewhere that is not a word of the command, so no prefix covers it.
+  if (/[<>]/.test(activeText(text))) return null;
   const parts = segments(text);
   if (parts === null) return null; // unbalanced quotes: no way to tell where a part ends
   for (const part of parts) {
-    const head = words(part)?.[0];
+    const head = wordSpans(part)?.[0]?.text;
     if (head !== undefined && SHELL_KEYWORDS.has(head)) return null;
   }
   // `FOO=bar command`: what the assignment prefixes may be anything at all.
@@ -92,11 +89,15 @@ export function shellParts(command: string): string[] | null {
   return parts;
 }
 
-/** The words a decision is remembered by: the command's first one, and its second when it has one. */
-export function commandPrefix(command: string): { words: string[]; text: string } {
-  const parsed = words(command.trim()) ?? [];
+/**
+ * The words a decision is remembered by: the command's first one, and its second when it has one.
+ * `expands` is true when either was built by a `$` or a backtick — remembering such words would
+ * remember a different command from the one the person read.
+ */
+export function commandPrefix(command: string): { words: string[]; text: string; expands: boolean } {
+  const parsed = wordSpans(command.trim()) ?? [];
   const head = parsed.slice(0, 2);
-  return { words: head, text: head.join(" ") };
+  return { words: head.map(word => word.text), text: head.map(word => word.text).join(" "), expands: head.some(word => word.expands) };
 }
 
 /** Two prefixes are the same when their words are: compared as words, never as one string split back apart. */
@@ -193,7 +194,7 @@ export function decideApproval(
   // (`find . -delete`: `find .` alone only reads). Remembering it would open the door for any
   // other flag after the same words, so those get one run and no standing grant.
   const candidate = first.prefix.words;
-  if (readOnly(first.prefix.text) || !rememberable(candidate)) {
+  if (first.prefix.expands || readOnly(first.prefix.text) || !rememberable(candidate)) {
     return { kind: "ask", once: ONCE, prefix: first.prefix.text, prefixWords: candidate };
   }
   return { kind: "ask", once: ONCE, remember: `${REMEMBER} ${first.prefix.text}`, prefix: first.prefix.text, prefixWords: candidate };

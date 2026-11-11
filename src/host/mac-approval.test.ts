@@ -91,8 +91,8 @@ test("reading ~/.ssh is read-only, because the design takes that risk rather tha
 });
 
 test("the remembered prefix is the first two words, and is what the dialog offers", () => {
-  assert.deepEqual(commandPrefix("npm test -- --watch"), { words: ["npm", "test"], text: "npm test" });
-  assert.deepEqual(commandPrefix("ls"), { words: ["ls"], text: "ls" });
+  assert.deepEqual(commandPrefix("npm test -- --watch"), { words: ["npm", "test"], text: "npm test", expands: false });
+  assert.deepEqual(commandPrefix("ls"), { words: ["ls"], text: "ls", expands: false });
   const decision = decideApproval("git commit -m x", { ...ask, allow: [] });
   assert.equal(decision.kind, "ask");
   assert.equal(decision.kind === "ask" ? decision.remember : "", "Always allow git commit");
@@ -268,4 +268,30 @@ test("a flag that writes is a question, not a read, all the way through decide",
   for (const command of ["echo x 2>&1", "git grep pattern", "rg TODO src", "tree src", "uniq in.txt", "file notes.txt", "awk '{print $1}' data", "sed 's/a/b/' f"]) {
     assert.equal(decideApproval(command, { ...ask, allow: [] }).kind, "auto", command);
   }
+});
+
+test("syntax the read-only check refuses is also no prefix: one run, no standing grant (G2)", () => {
+  for (const command of ["(rm x)", "ls *(e:'touch /tmp/pwn':)", "cat =(touch /tmp/pwn)", "echo $(whoami)", "find . -{delete,print}"]) {
+    assert.equal(shellParts(command), null, `${command} is not a list of plain commands`);
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "ask", command);
+    assert.equal(decision.kind === "ask" ? decision.remember : "x", undefined, command);
+  }
+});
+
+test("a prefix built by an expansion is never remembered (G3): it is not the command the person read", () => {
+  // the expansion is in the words that would be remembered
+  for (const command of ['mkdir "$DIR"', "touch ${FILE}"]) {
+    const decision = decideApproval(command, { ...ask, allow: [] });
+    assert.equal(decision.kind, "ask", command);
+    assert.equal(decision.kind === "ask" ? decision.remember : "x", undefined, command);
+    assert.equal(decision.kind === "ask" ? decision.prefixWords.some(word => word.includes("$")) : false, true, command);
+  }
+  // `rm -rf $TARGET` is refused for another reason (rm is never a prefix), which is fine too
+  const removed = decideApproval("rm -rf $TARGET", { ...ask, allow: [] });
+  assert.equal(removed.kind === "ask" ? removed.remember : "x", undefined);
+  // an expansion after the prefix is the command's own business: `mkdir -p "$dir"` still remembers `mkdir -p`
+  const later = decideApproval('mkdir -p "$dir"', { ...ask, allow: [] });
+  assert.equal(later.kind, "ask");
+  assert.equal(later.kind === "ask" ? later.remember : "", "Always allow mkdir -p");
 });

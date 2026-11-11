@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyShell } from "./shell-readonly.ts";
+import { classifyShell, GUARDED_NAMES, scanShell, segments, stripDiscardRedirects, unmodelledSyntax, words, wordSpans } from "./shell-readonly.ts";
 
 test("commands that only read are said to, and everything uncertain is not", () => {
   for (const command of [
@@ -150,5 +150,132 @@ test("commands that only read are said to, and everything uncertain is not", () 
     const verdict = classifyShell(command);
     assert.equal(verdict.readOnly, false, command);
     if (!verdict.readOnly) assert.match(verdict.because, why, command);
+  }
+});
+
+test("words are joined the way zsh joins them (G1): adjacent pieces are one word, escapes are resolved", () => {
+  assert.deepEqual(words('-"delete"'), ["-delete"]);
+  assert.deepEqual(words("-de\\lete"), ["-delete"]);
+  assert.deepEqual(words('gr""ep'), ["grep"]);
+  assert.deepEqual(words('l"s"'), ["ls"]);
+  assert.deepEqual(words("r\\m"), ["rm"]);
+  assert.deepEqual(words("\"a b\""), ["a b"]);
+  assert.deepEqual(words("'a b'"), ["a b"], "a quoted space does not split a word");
+  assert.equal(words("'unclosed"), null, "an open quote cannot be read");
+  // `$` and backticks outside single quotes mean the word is built at run time.
+  assert.deepEqual(wordSpans("cat $HOME/f"), [{ text: "cat", expands: false }, { text: "$HOME/f", expands: true }]);
+  assert.deepEqual(wordSpans("cat '$HOME'"), [{ text: "cat", expands: false }, { text: "$HOME", expands: false }], "single quotes are literal");
+  assert.deepEqual(wordSpans('cat "$HOME"'), [{ text: "cat", expands: false }, { text: "$HOME", expands: true }]);
+  assert.deepEqual(wordSpans("cat \\$HOME"), [{ text: "cat", expands: false }, { text: "$HOME", expands: false }], "an escaped $ is literal");
+  assert.deepEqual(wordSpans("find . -de\\lete"), [{ text: "find", expands: false }, { text: ".", expands: false }, { text: "-delete", expands: false }]);
+});
+
+test("segments, the redirect stripper and the words agree on where the quotes are (G1)", () => {
+  // zsh does not split on these separators: they are inside quotes or escaped.
+  assert.deepEqual(segments("echo 'a;b' && ls"), ["echo 'a;b'", "ls"]);
+  assert.deepEqual(segments('echo "x|y" ; ls'), ['echo "x|y"', "ls"]);
+  assert.deepEqual(segments("echo a\\;b"), ["echo a\\;b"]);
+  // the stripper leaves a quoted /dev/null alone, as the scanner says it is not a redirection
+  assert.equal(stripDiscardRedirects("grep '2>/dev/null' f"), "grep '2>/dev/null' f");
+  assert.equal(stripDiscardRedirects("echo a\\>b"), "echo a\\>b");
+  // and the words of one segment are the words the scanner counted
+  for (const command of ["echo 'a;b' && ls", 'echo "x|y" ; ls', "echo a\\;b", 'l"s" -la']) {
+    const scan = scanShell(command);
+    assert.equal(scan.balanced, true, command);
+    for (const part of segments(command) ?? []) assert.notEqual(words(part), null, part);
+  }
+});
+
+test("syntax this file does not model is not a read (G2): zsh runs something the words do not show", () => {
+  const cases: [string, RegExp][] = [
+    // a subshell or a zsh glob qualifier: zsh runs what is inside
+    ["(rm x)", /subshell or a pattern qualifier/],
+    ["ls *(e:'touch /tmp/pwn':)", /subshell or a pattern qualifier/],
+    ["cat =(touch /tmp/pwn)", /subshell or a pattern qualifier/],
+    ["ls <(touch /tmp/pwn)", /subshell or a pattern qualifier/],
+    // ANSI-C quoting has its own escape rules, so a scan of it is off by one
+    [String.raw`echo $'\'' ; rm x #'`, /ANSI-C or localised quote/],
+    [String.raw`echo $"x"`, /ANSI-C or localised quote/],
+    // brace expansion turns one word into several (`find . -{delete,print}` runs -delete)
+    ["find . -{delete,print}", /brace expansion/],
+    ["ls {a,b}", /brace expansion/],
+    // substitutions run inside double quotes too (`echo "$(rm x)"` runs rm)
+    ["echo $(rm x)", /command substitution/],
+    ["echo `rm x`", /command substitution/],
+    ['echo "$(rm x)"', /command substitution/],
+    ['echo "`rm x`"', /command substitution/],
+    ['cat "$(touch /tmp/pwn)"', /command substitution/],
+    ["echo ${x:-$(id -u)}", /command substitution/],
+  ];
+  for (const [command, why] of cases) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, command);
+    if (!verdict.readOnly) assert.match(verdict.because, why, command);
+  }
+  // what is not a brace expansion, and what is escaped, stays a read
+  assert.equal(classifyShell("echo ${PATH}").readOnly, true);
+  assert.equal(classifyShell('echo "$HOME"').readOnly, true, "a variable is not a substitution");
+  assert.equal(classifyShell("echo '$(rm x)'").readOnly, true, "single quotes are literal");
+  assert.equal(classifyShell("find . -name x {} +").readOnly, true);
+  assert.equal(classifyShell("git log HEAD@{1}").readOnly, true);
+  assert.equal(classifyShell("find . \\( -name a -o -name b \\)").readOnly, true, "escaped parentheses are find's arguments");
+  assert.equal(unmodelledSyntax("find . \\( -name a \\)"), undefined);
+});
+
+test("an expansion inside a checked program's arguments is not a read (G3): `find . -${HOME:+delete}` deletes", () => {
+  for (const command of ["find . -${HOME:+delete}", 'find . "-${HOME:+delete}"', "sort -$X /tmp/y in", "rg $PATTERN src", "sed -e $S f"]) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, command);
+    if (!verdict.readOnly) assert.match(verdict.because, /expansion in .* arguments/, command);
+  }
+  // programs with no argument checks may still use expansions: expanding only chooses what to read
+  for (const command of ["cat $HOME/.zshrc", 'ls "$HOME"', "echo ${PATH}", "grep -rn foo ${PWD}/src", "head -5 $FILE"]) {
+    assert.equal(classifyShell(command).readOnly, true, command);
+  }
+});
+
+test("every program with its own check is in the guarded set (G3), so the expansion rule cannot miss one", () => {
+  const expected = ["find", "sed", "awk", "gawk", "git", "docker", "podman", "npm", "pnpm", "yarn", "node", "python", "python3", "kubectl", "systemctl", "command", "sort", "xxd", "rg", "ag", "tree", "uniq", "file", "less", "more", "date", "hostname", "diff", "mount"];
+  for (const name of expected) assert.equal(GUARDED_NAMES.has(name), true, name);
+  assert.equal(GUARDED_NAMES.size, new Set(expected).size, "no guarded program is missing from the list");
+});
+
+test("sed's options are a whitelist, so a glued -e cannot hide a script (G4)", () => {
+  // zsh runs `sed -es/a/b/w /tmp/pwn` as -e 's/a/b/w /tmp/pwn'
+  const refused = ["sed '-es/a/b/w /tmp/pwn' 1p f", "sed -z 's/a/b/' f", "sed --unknown f", "sed -i.bak 's/a/b/' f"];
+  for (const command of refused) assert.equal(classifyShell(command).readOnly, false, command);
+  const reads = ["sed -n '1,5p' f", "sed -E 's/a+/b/g' f", "sed -ne '1,5p' f", "sed -nE 's/a/b/' f", "sed -n -e 1p -e 5p f", "sed --expression='s/a/b/' f", "sed --quiet 'p' f"];
+  for (const command of reads) assert.equal(classifyShell(command).readOnly, true, command);
+});
+
+test("git's sub-actions and options are checked by what they do (G5)", () => {
+  const refused: [string, RegExp][] = [
+    ["git reflog expire --expire=now --all", /git reflog rewriting history/],
+    ["git reflog delete HEAD@{1}", /git reflog rewriting history/],
+    ["git branch newbranch", /git branch creating a ref/],
+    ["git tag v9.9.9", /git tag creating a ref/],
+    ["git branch -D old", /git branch that changes refs/],
+  ];
+  for (const [command, why] of refused) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, command);
+    if (!verdict.readOnly) assert.match(verdict.because, why, command);
+  }
+  const reads = ["git reflog", "git reflog show --date=iso", "git branch", "git branch -a", "git branch -vv", "git branch --list 'ours/*'", "git branch --contains HEAD", "git tag", "git tag -l 'v0.3.*'", "git status"];
+  for (const command of reads) assert.equal(classifyShell(command).readOnly, true, command);
+  // npm audit fix is a positional sub-action, not --fix
+  assert.equal(classifyShell("npm audit fix").readOnly, false);
+  assert.equal(classifyShell("npm audit").readOnly, true);
+  // an `o` inside a short cluster still writes
+  assert.equal(classifyShell("less -No /tmp/x f").readOnly, false);
+  assert.equal(classifyShell("less -N f").readOnly, true);
+});
+
+test("awk statements end at braces too, so a comparison is not a print redirection (G6)", () => {
+  for (const command of ["awk 'NR>1 && $2>=10 {n++} END{print n}' d", "awk '$1 > 5 {print $2}' d", "awk '{print $1}' d"]) {
+    assert.equal(classifyShell(command).readOnly, true, command);
+  }
+  for (const command of ["awk '{print $1 > \"out\"}' d", "awk '{ if ($1 > 5) print $2 > \"o\" }' d"]) {
+    assert.equal(classifyShell(command).readOnly, false, command);
   }
 });
