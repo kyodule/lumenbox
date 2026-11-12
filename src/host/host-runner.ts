@@ -38,7 +38,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { callEnvironment } from "../egress/call.ts";
 import type { HostEgress } from "./host-egress.ts";
 import { type HostSandbox, type SandboxMechanism, sandboxViolations } from "./host-sandbox.ts";
-import { cancelDecision, DESKTOP_GRACE_MS, type HostExecStore, waitAfterDisconnect } from "./host-exec-store.ts";
+import { cancelDecision, type HostExecStore, waitAfterDisconnect } from "./host-exec-store.ts";
 
 export interface HostRunnerConfig {
   /** Whether the host door exists at all. Default false. */
@@ -211,7 +211,6 @@ interface PendingDesktopRun {
   resolve: (result: HostRunResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
-  grace?: ReturnType<typeof setTimeout>;
   seat: number;
 }
 
@@ -293,7 +292,7 @@ export class DesktopHostRunner extends HostRunner {
     for (const [id, waiting] of this.pending) {
       if (waiting.seat !== old) continue;
       clearTimeout(waiting.timer);
-      waitAfterDisconnect(this.store, id, waiting, this.store?.graceMs ?? DESKTOP_GRACE_MS, () => { this.pending.delete(id); }, why);
+      waitAfterDisconnect(this.store, id, waiting, () => { this.pending.delete(id); }, why);
     }
   }
 
@@ -328,7 +327,7 @@ export class DesktopHostRunner extends HostRunner {
     const waiting = this.pending.get(answer.id);
     if (waiting === undefined) return false;
     this.pending.delete(answer.id);
-    clearTimeout(waiting.timer); clearTimeout(waiting.grace);
+    clearTimeout(waiting.timer);
     if (typeof answer.refused === "string") {
       this.store?.settled(answer.id, { refused: answer.refused });
       waiting.reject(new Error(`Not run on the Mac: ${answer.refused}`));
@@ -355,7 +354,7 @@ export class DesktopHostRunner extends HostRunner {
     return true;
   }
 
-  status(id: string): ReturnType<HostExecStore["status"]> { return this.store?.status(id) ?? { state: "unknown", started: false }; } // the way back to a request_id after a disconnect
+  status(id: string): ReturnType<HostExecStore["status"]> { return this.store?.status(id) ?? { state: "not_found", started: false }; } // the way back to a request_id after a disconnect
   cancel(id: string): ReturnType<typeof cancelDecision> { return cancelDecision(this.store, id, this.pending.has(id), frame => this.seat?.write(frame)); }
 
   /**

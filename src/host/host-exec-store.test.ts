@@ -25,9 +25,15 @@ function seat() {
 
 const result = { stdout: "hi\n", stderr: "", code: 0, timedOut: false, truncatedBytes: 0 };
 
-test("an id the ledger never saw is unknown, never 'safe to re-run'", () => {
+test("an id the ledger never saw is not_found, not 'unknown': those mean different things", () => {
   const { store: ledger } = store();
-  assert.deepEqual(ledger.status("nope"), { state: "unknown", started: false });
+  assert.deepEqual(ledger.status("nope"), { state: "not_found", started: false }, "never sent is not 'may have run'");
+
+  // The same call on a command that went out and lost its answer must read differently.
+  ledger.sent("sent-then-lost", "Ada", "sleep 60");
+  ledger.unknown("sent-then-lost");
+  assert.equal(ledger.status("sent-then-lost").state, "unknown");
+  assert.notEqual(ledger.status("nope").state, ledger.status("sent-then-lost").state);
 });
 
 test("sent, then done with its result: the record outlives the stream", async () => {
@@ -53,7 +59,7 @@ test("sent, then done with its result: the record outlives the stream", async ()
   // A finished command is not cancellable; that is a fact about it, not an error.
   const cancelled = runner.cancel(id);
   assert.equal(cancelled.outcome, "already_completed");
-  assert.equal(cancelled.text, "already_completed");
+  assert.equal(cancelled.text, "已完成，无需取消");
   void first;
 });
 
@@ -108,8 +114,24 @@ test("startup drops done rows older than a day and keeps the rest", () => {
   ].join("\n") + "\n");
 
   const ledger = new HostExecStore(file, { graceMs: 20 });
-  assert.equal(ledger.status("old-done").state, "unknown", "a day-old done row was cleaned");
+  assert.equal(ledger.status("old-done").state, "not_found", "a day-old done row was cleaned");
   assert.equal(ledger.status("recent-done").state, "done");
   assert.equal(ledger.status("old-unknown").state, "unknown", "an unknown outcome is kept: it is the evidence");
   assert.equal(ledger.status("old-sent").state, "sent", "a command that never came back is kept too");
+});
+
+test("an unknown outcome is never pruned, however old: it is the only record the command was sent", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agentbox-hostexec-"));
+  const file = join(dir, "pending.jsonl");
+  const ancient = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+  writeFileSync(file, [
+    JSON.stringify({ id: "lost-31d", at: ancient, state: "unknown", agent: "Ada", command: "make" }),
+    JSON.stringify({ id: "sent-31d", at: ancient, state: "sent" }),
+    JSON.stringify({ id: "done-31d", at: ancient, state: "done", result }),
+  ].join("\n") + "\n");
+
+  const ledger = new HostExecStore(file, { graceMs: 20 });
+  assert.equal(ledger.status("lost-31d").state, "unknown", "31 days old and still the evidence");
+  assert.equal(ledger.status("sent-31d").state, "sent");
+  assert.equal(ledger.status("done-31d").state, "not_found", "done is the one that expires");
 });

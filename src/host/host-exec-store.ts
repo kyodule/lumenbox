@@ -34,6 +34,12 @@ export const KEEP_DONE_MS = 24 * 60 * 60 * 1000;
 
 export type HostExecState = "sent" | "done" | "unknown";
 
+/**
+ * What a query can answer. `not_found` is its own word: an id the ledger never saw must never read
+ * as "sent and unknown", which says the command may have run.
+ */
+export type HostExecStatus = HostExecState | "not_found";
+
 /** What a finished command returned, as much of it as the ledger keeps. */
 export interface StoredResult {
   stdout: string;
@@ -44,7 +50,7 @@ export interface StoredResult {
 }
 
 export interface StoredStatus {
-  state: HostExecState;
+  state: HostExecStatus;
   result?: StoredResult;
   /** The Mac said it had started the command (a frame of its own, before the result). */
   started: boolean;
@@ -93,10 +99,10 @@ export class HostExecStore {
     this.append({ id, at: this.now(), cancelled: when });
   }
 
-  /** One command's state. An id the ledger never saw is `unknown` — never "safe to re-run". */
+  /** One command's state. An id the ledger never saw is `not_found` — never "unknown", never "safe to re-run". */
   status(id: string): StoredStatus {
     const entry = this.rows().get(id);
-    if (entry === undefined) return { state: "unknown", started: false };
+    if (entry === undefined) return { state: "not_found", started: false };
     return {
       state: (entry.state as HostExecState | undefined) ?? "sent",
       started: entry.started === true,
@@ -123,10 +129,13 @@ export class HostExecStore {
     const rows = this.rows();
     let removed = 0;
     for (const [id, entry] of rows) {
-      const finished = entry.state === "done" || entry.state === "unknown";
+      // Only done rows expire. `unknown` and `sent` are kept for good: they are the whole record
+      // that the command was ever sent, and dropping them at a day old is how the evidence that a
+      // command may have run disappears. The file still cannot grow per state change — pruning
+      // rewrites one row per command.
+      if (entry.state !== "done") continue;
       const at = typeof entry.at === "string" ? Date.parse(entry.at) : Number.NaN;
-      const old = Number.isFinite(at) && now.getTime() - at > KEEP_DONE_MS;
-      if (finished && old) {
+      if (Number.isFinite(at) && now.getTime() - at > KEEP_DONE_MS) {
         rows.delete(id);
         removed += 1;
       }
@@ -184,13 +193,12 @@ export class HostExecStore {
 export function waitAfterDisconnect(
   store: HostExecStore | undefined,
   id: string,
-  waiting: { resolve: (result: StoredResult) => void; reject: (error: Error) => void; grace?: ReturnType<typeof setTimeout> },
-  graceMs: number,
+  waiting: { resolve: (result: StoredResult) => void; reject: (error: Error) => void },
   forget: () => void,
   why: string,
 ): void {
   store?.unknown(id);
-  waiting.grace = setTimeout(() => {
+  setTimeout(() => {
     forget();
     const status = store?.status(id);
     if (status?.state === "done" && status.result !== undefined) {
@@ -199,8 +207,7 @@ export function waitAfterDisconnect(
     }
     // Never replayed here or anywhere: the command may already have run once on the Mac.
     waiting.reject(new Error(`${why} while the command was out. Its result is unknown: it may or may not have run on the Mac. Check before running it again.`));
-  }, graceMs);
-  waiting.grace.unref?.();
+  }, store?.graceMs ?? DESKTOP_GRACE_MS).unref?.();
 }
 
 export type CancelOutcome = "not_sent" | "not_started" | "running" | "already_completed";
@@ -225,18 +232,18 @@ export function cancelDecision(
   send: (frame: string) => void,
 ): CancelDecision {
   const status = store?.status(id);
+  const text = { not_started: "已取消，未执行", running: "已取消，可能已执行", completed: "已完成，无需取消" } as const;
   if (status?.cancelled !== undefined) {
-    return status.cancelled === "running"
-      ? { outcome: "running", text: "已取消，可能已执行" }
-      : { outcome: "not_started", text: "已取消，未执行" };
+    return { outcome: status.cancelled, text: text[status.cancelled] };
   }
-  if (status?.state === "done") return { outcome: "already_completed", text: "already_completed" };
-  if (!pending) {
-    // Sent, and already gone from the runner: either it finished (above) or the ledger never had it.
-    return { outcome: "not_sent", text: "已取消，未执行" };
+  if (status?.state === "done") return { outcome: "already_completed", text: text.completed };
+  if (status?.state === "not_found" || (status === undefined && !pending)) {
+    // The ledger has never heard of it: there is nothing to stop, and nothing ran.
+    return { outcome: "not_sent", text: text.not_started };
   }
-  const running = status?.started === true;
+  // An unknown outcome still may have run: its answer never came, so the group may be alive.
+  const running = status?.started === true || status?.state === "unknown";
   send(`data: ${JSON.stringify({ type: "cancel", id })}\n\n`);
   store?.cancelled(id, running ? "running" : "not_started");
-  return running ? { outcome: "running", text: "已取消，可能已执行" } : { outcome: "not_started", text: "已取消，未执行" };
+  return running ? { outcome: "running", text: text.running } : { outcome: "not_started", text: text.not_started };
 }

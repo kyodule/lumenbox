@@ -82,6 +82,20 @@ test("started: cancelled as may-have-run", async () => {
   await drain(runner, id, pending);
 });
 
+test("an unknown outcome may still be running: it is cancelled as may-have-run", async () => {
+  const ledger = store();
+  const runner = new DesktopHostRunner({ store: ledger });
+  const s = seat();
+  runner.attach(s.write);
+  ledger.sent("lost-elsewhere", "Ada", "sleep 300");
+  ledger.unknown("lost-elsewhere");
+
+  const decision = runner.cancel("lost-elsewhere");
+  assert.equal(decision.outcome, "running");
+  assert.equal(decision.text, "已取消，可能已执行");
+  assert.equal(s.frames.filter(frame => frame.type === "cancel").length, 1, "the Mac may still hold it");
+});
+
 test("a finished command is already_completed, not an error", async () => {
   const runner = new DesktopHostRunner({ store: store() });
   const s = seat();
@@ -93,7 +107,7 @@ test("a finished command is already_completed, not an error", async () => {
 
   const decision = runner.cancel(id);
   assert.equal(decision.outcome, "already_completed");
-  assert.equal(decision.text, "already_completed");
+  assert.equal(decision.text, "已完成，无需取消", "the same language as the other two");
   assert.equal(s.frames.filter(frame => frame.type === "cancel").length, 0);
 });
 
