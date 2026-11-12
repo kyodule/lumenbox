@@ -38,13 +38,13 @@ async function drain(runner: DesktopHostRunner, id: string, pending: Promise<unk
   await pending.catch(() => {});
 }
 
-test("an id that never went out is cancelled as not run, and nothing is sent", async () => {
+test("an id the ledger never saw is not_found, and nothing is sent", async () => {
   const runner = new DesktopHostRunner({ store: store() });
   const s = seat();
   runner.attach(s.write);
   const decision = runner.cancel("never-sent");
-  assert.equal(decision.outcome, "not_sent");
-  assert.equal(decision.text, "已取消，未执行");
+  assert.equal(decision.outcome, "not_found");
+  assert.equal(decision.text, "账本里没有这条命令，无法取消");
   assert.equal(s.frames.filter(frame => frame.type === "cancel").length, 0, "there is nothing to cancel on the Mac");
 });
 
@@ -82,7 +82,7 @@ test("started: cancelled as may-have-run", async () => {
   await drain(runner, id, pending);
 });
 
-test("an unknown outcome may still be running: it is cancelled as may-have-run", async () => {
+test("an unknown outcome is not cancelled by guessing: no frame, and the person is told to check", async () => {
   const ledger = store();
   const runner = new DesktopHostRunner({ store: ledger });
   const s = seat();
@@ -91,9 +91,22 @@ test("an unknown outcome may still be running: it is cancelled as may-have-run",
   ledger.unknown("lost-elsewhere");
 
   const decision = runner.cancel("lost-elsewhere");
-  assert.equal(decision.outcome, "running");
-  assert.equal(decision.text, "已取消，可能已执行");
-  assert.equal(s.frames.filter(frame => frame.type === "cancel").length, 1, "the Mac may still hold it");
+  assert.equal(decision.outcome, "unknown");
+  assert.equal(decision.text, "结果未知，无法取消；先确认它是否执行过");
+  assert.equal(s.frames.filter(frame => frame.type === "cancel").length, 0, "nothing is waiting, so the Mac must not be asked to guess");
+});
+
+test("sent, but no longer waiting here (a restart): unknown, not a cancel frame", async () => {
+  const ledger = store();
+  const runner = new DesktopHostRunner({ store: ledger });
+  const s = seat();
+  runner.attach(s.write);
+  ledger.sent("sent-before-restart", "Ada", "npm test");
+
+  const decision = runner.cancel("sent-before-restart");
+  assert.equal(decision.outcome, "unknown");
+  assert.equal(decision.text, "结果未知，无法取消；先确认它是否执行过");
+  assert.equal(s.frames.filter(frame => frame.type === "cancel").length, 0);
 });
 
 test("a finished command is already_completed, not an error", async () => {

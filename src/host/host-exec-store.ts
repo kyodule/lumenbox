@@ -16,9 +16,11 @@
  * A command is never re-sent because of what is in this file. It records; it does not decide.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { agentboxHome } from "../config.ts";
 import { appendLine, appendLineDurably, type LedgerKind } from "./jsonl.ts";
+import type { DesktopHostRunner } from "./host-runner.ts";
 
 /**
  * What this ledger is: a queue of work in flight. Compaction may drop what is finished (a done row
@@ -210,7 +212,44 @@ export function waitAfterDisconnect(
   }, store?.graceMs ?? DESKTOP_GRACE_MS).unref?.();
 }
 
-export type CancelOutcome = "not_sent" | "not_started" | "running" | "already_completed";
+/**
+ * The ledger's two routes, behind the same guard as the Mac's own routes in `serve()` (admin only:
+ * they are a door to the same machine's commands). Status by request_id, and cancel.
+ *
+ * Here rather than in host-runner.ts because that file's line budget has one line left, and this is
+ * the part that will grow.
+ */
+export async function serveLedger(
+  route: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  send: (res: ServerResponse, status: number, body: unknown) => void,
+  refusedRole: (need: "admin") => boolean,
+  readJson: (req: IncomingMessage) => Promise<unknown>,
+  runner: DesktopHostRunner,
+): Promise<boolean> {
+  if (route !== "GET /api/host-exec/status" && route !== "POST /api/host-exec/cancel") return false;
+  if (refusedRole("admin")) return true;
+  if (route === "GET /api/host-exec/status") {
+    const id = new URL(req.url ?? "", "http://localhost").searchParams.get("id") ?? "";
+    if (id === "") {
+      send(res, 400, { error: "id is required" });
+      return true;
+    }
+    send(res, 200, runner.status(id));
+    return true;
+  }
+  const body = (await readJson(req)) as { id?: unknown } | null;
+  const id = body !== null && typeof body === "object" && typeof body.id === "string" ? body.id : "";
+  if (id === "") {
+    send(res, 400, { error: "id is required" });
+    return true;
+  }
+  send(res, 200, runner.cancel(id));
+  return true;
+}
+
+export type CancelOutcome = "not_started" | "running" | "already_completed" | "unknown" | "not_found";
 
 export interface CancelDecision {
   outcome: CancelOutcome;
@@ -232,17 +271,22 @@ export function cancelDecision(
   send: (frame: string) => void,
 ): CancelDecision {
   const status = store?.status(id);
-  const text = { not_started: "已取消，未执行", running: "已取消，可能已执行", completed: "已完成，无需取消" } as const;
-  if (status?.cancelled !== undefined) {
-    return { outcome: status.cancelled, text: text[status.cancelled] };
-  }
+  const text = {
+    not_started: "已取消，未执行",
+    running: "已取消，可能已执行",
+    completed: "已完成，无需取消",
+    lost: "结果未知，无法取消；先确认它是否执行过",
+    missing: "账本里没有这条命令，无法取消",
+  } as const;
+  if (status?.cancelled !== undefined) return { outcome: status.cancelled, text: text[status.cancelled] };
   if (status?.state === "done") return { outcome: "already_completed", text: text.completed };
-  if (status?.state === "not_found" || (status === undefined && !pending)) {
-    // The ledger has never heard of it: there is nothing to stop, and nothing ran.
-    return { outcome: "not_sent", text: text.not_started };
+  if (!pending) {
+    // Nothing is waiting here. A cancel frame now would be a command the Mac has to guess the
+    // meaning of, and it is almost certainly not holding this one any more.
+    if (status?.state === "sent" || status?.state === "unknown") return { outcome: "unknown", text: text.lost };
+    return { outcome: "not_found", text: text.missing };
   }
-  // An unknown outcome still may have run: its answer never came, so the group may be alive.
-  const running = status?.started === true || status?.state === "unknown";
+  const running = status?.started === true;
   send(`data: ${JSON.stringify({ type: "cancel", id })}\n\n`);
   store?.cancelled(id, running ? "running" : "not_started");
   return running ? { outcome: "running", text: text.running } : { outcome: "not_started", text: text.not_started };

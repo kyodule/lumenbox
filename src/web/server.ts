@@ -6758,7 +6758,7 @@ export async function startWebServer(options: WebOptions): Promise<() => void> {
           return;
         }
 
-        if (hostRunner instanceof DesktopHostRunner && (await hostRunner.serve(route, req, res, send, refusedRole, readJson))) return; if (route === "GET /api/events") { // LUMENBOX-FORK
+        if (hostRunner instanceof DesktopHostRunner && (await hostRunner.control(route, req, res, send, refusedRole, readJson))) return; if (route === "GET /api/events") { // LUMENBOX-FORK
           res.writeHead(200, {
             "content-type": "text/event-stream",
             "cache-control": "no-store",

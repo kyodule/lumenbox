@@ -38,7 +38,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { callEnvironment } from "../egress/call.ts";
 import type { HostEgress } from "./host-egress.ts";
 import { type HostSandbox, type SandboxMechanism, sandboxViolations } from "./host-sandbox.ts";
-import { cancelDecision, type HostExecStore, waitAfterDisconnect } from "./host-exec-store.ts";
+import { cancelDecision, type HostExecStore, serveLedger, waitAfterDisconnect } from "./host-exec-store.ts";
 
 export interface HostRunnerConfig {
   /** Whether the host door exists at all. Default false. */
@@ -356,6 +356,7 @@ export class DesktopHostRunner extends HostRunner {
 
   status(id: string): ReturnType<HostExecStore["status"]> { return this.store?.status(id) ?? { state: "not_found", started: false }; } // the way back to a request_id after a disconnect
   cancel(id: string): ReturnType<typeof cancelDecision> { return cancelDecision(this.store, id, this.pending.has(id), frame => this.seat?.write(frame)); }
+  async control(route: string, req: IncomingMessage, res: ServerResponse, send: (res: ServerResponse, status: number, body: unknown) => void, refusedRole: (need: "admin") => boolean, readJson: (req: IncomingMessage) => Promise<unknown>): Promise<boolean> { return (await serveLedger(route, req, res, send, refusedRole, readJson, this)) || (await this.serve(route, req, res, send, refusedRole, readJson)); }
 
   /**
    * The two routes the Mac's app uses, reached after the UI token check like every route; admin
