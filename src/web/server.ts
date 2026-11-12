@@ -142,6 +142,7 @@ import { TelegramChannel } from "../channels/telegram.ts";
 import { parseTailmsgRecordConfig, tailmsgDoorFromRecord } from "../channels/tailmsg.ts";
 import { startHostEgress } from "../host/host-egress.ts";
 import { DesktopHostRunner, HostRunner, hostRunnerConfig } from "../host/host-runner.ts";
+import { HostExecStore } from "../host/host-exec-store.ts";
 import { HostSandbox } from "../host/host-sandbox.ts";
 import { outboundRedactor } from "../host/redact-outbound.ts";
 import { blockedQuestion, describePurpose, outboundVerdict } from "../host/outbound.ts";
@@ -510,7 +511,7 @@ export async function startWebServer(options: WebOptions): Promise<() => void> {
     egress: relayEnv === undefined ? Promise.resolve(undefined) : startHostEgress({ ...relayEnv, log }).catch((error: unknown) => { log(`host egress: not started (${error instanceof Error ? error.message : String(error)}); host processes have no network`); return undefined; }),
   };
   // The door out of the box, from config: off unless an operator turned it on; read once, like the provider.
-  const hostRunner = process.env.AGENTBOX_HOST_EXEC === "desktop" ? new DesktopHostRunner({ log }) : new HostRunner(hostRunnerConfig(loadConfig().hostExec ?? {}), hostProcess); // LUMENBOX-FORK: RunOnHost on the person's Mac
+  const hostRunner = process.env.AGENTBOX_HOST_EXEC === "desktop" ? new DesktopHostRunner({ log, store: new HostExecStore() }) : new HostRunner(hostRunnerConfig(loadConfig().hostExec ?? {}), hostProcess); // LUMENBOX-FORK: RunOnHost on the person's Mac
   if (hostRunner.enabled) log("host execution is on; every host command still asks for approval");
 
 

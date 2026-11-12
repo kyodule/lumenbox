@@ -107,6 +107,10 @@ function runCommand(job: RunJob): Promise<RunResult> {
   const cwd = typeof job.cwd === "string" && job.cwd.trim() !== "" ? expandHome(job.cwd.trim()) : homedir();
   return new Promise(resolve => {
     const child = spawn(shell, ["-lc", job.command], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    // Announce the group before anything else: the shell is detached, so its pid is the group's, and
+    // the app needs it to cancel. A line of its own, before the result, because the app reads the
+    // result at exit and this has to arrive while the command is still running.
+    if (child.pid !== undefined) process.stdout.write(`${JSON.stringify({ started: true, pid: child.pid })}\n`);
     const stdout = capped(cap);
     const stderr = capped(cap);
     let timedOut = false;
@@ -182,7 +186,7 @@ async function main(): Promise<void> {
     return;
   }
   if (job.phase === "run") {
-    process.stdout.write(JSON.stringify({ result: await runCommand(job) }));
+    process.stdout.write(`${JSON.stringify({ result: await runCommand(job) })}\n`);
     return;
   }
   throw new Error("job.phase must be decide, remember or run");

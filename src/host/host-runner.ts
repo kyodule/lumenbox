@@ -38,6 +38,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { callEnvironment } from "../egress/call.ts";
 import type { HostEgress } from "./host-egress.ts";
 import { type HostSandbox, type SandboxMechanism, sandboxViolations } from "./host-sandbox.ts";
+import { cancelDecision, DESKTOP_GRACE_MS, type HostExecStore, waitAfterDisconnect } from "./host-exec-store.ts";
 
 export interface HostRunnerConfig {
   /** Whether the host door exists at all. Default false. */
@@ -210,6 +211,7 @@ interface PendingDesktopRun {
   resolve: (result: HostRunResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  grace?: ReturnType<typeof setTimeout>;
   seat: number;
 }
 
@@ -239,12 +241,14 @@ export class DesktopHostRunner extends HostRunner {
   private seat: { id: number; write: (frame: string) => void } | undefined;
   private seats = 0;
   private readonly pending = new Map<string, PendingDesktopRun>();
+  private readonly store?: HostExecStore;
   private readonly note: (line: string) => void;
   private readonly approvalMs: number;
   private readonly commandMs: number;
 
-  constructor(options: { log?: (line: string) => void; approvalMs?: number; commandMs?: number } = {}) {
+  constructor(options: { log?: (line: string) => void; approvalMs?: number; commandMs?: number; store?: HostExecStore } = {}) {
     super(hostRunnerConfig({ enabled: true }));
+    this.store = options.store;
     this.note = options.log ?? (() => {});
     this.approvalMs = options.approvalMs ?? DESKTOP_APPROVAL_MS;
     this.commandMs = options.commandMs ?? hostRunnerConfig({}).timeoutMs;
@@ -288,10 +292,8 @@ export class DesktopHostRunner extends HostRunner {
     this.seat = undefined;
     for (const [id, waiting] of this.pending) {
       if (waiting.seat !== old) continue;
-      this.pending.delete(id);
       clearTimeout(waiting.timer);
-      // Never replayed: the command may already have run once on the Mac.
-      waiting.reject(new Error(`${why} while the command was out. Its result is unknown: it may or may not have run on the Mac. Check before running it again.`));
+      waitAfterDisconnect(this.store, id, waiting, this.store?.graceMs ?? DESKTOP_GRACE_MS, () => { this.pending.delete(id); }, why);
     }
   }
 
@@ -302,6 +304,7 @@ export class DesktopHostRunner extends HostRunner {
     const id = randomUUID();
     const timeoutMs = this.commandMs;
     return new Promise<HostRunResult>((resolve, reject) => {
+      this.store?.sent(id, agent, command); // first: a ledger that cannot take it stops the run before anything is pending
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`No answer from the Mac within ${Math.round((this.approvalMs + timeoutMs + DESKTOP_SLACK_MS) / 1000)} seconds. Its result is unknown.`));
@@ -319,13 +322,15 @@ export class DesktopHostRunner extends HostRunner {
 
   /** The Mac's answer for one command. False when no command with that id is waiting. */
   settle(body: unknown): boolean {
-    const answer = (body ?? {}) as { id?: unknown; result?: unknown; refused?: unknown };
+    const answer = (body ?? {}) as { id?: unknown; result?: unknown; refused?: unknown; started?: unknown };
     if (typeof answer.id !== "string") return false;
+    if (answer.started === true) { this.store?.started(answer.id); return true; } // it began: settles nothing, makes a cancel honest
     const waiting = this.pending.get(answer.id);
     if (waiting === undefined) return false;
     this.pending.delete(answer.id);
-    clearTimeout(waiting.timer);
+    clearTimeout(waiting.timer); clearTimeout(waiting.grace);
     if (typeof answer.refused === "string") {
+      this.store?.settled(answer.id, { refused: answer.refused });
       waiting.reject(new Error(`Not run on the Mac: ${answer.refused}`));
       return true;
     }
@@ -335,7 +340,7 @@ export class DesktopHostRunner extends HostRunner {
       return true;
     }
     const text = (value: unknown) => (typeof value === "string" ? value.slice(0, DESKTOP_MAX_TEXT) : "");
-    waiting.resolve({
+    const result: HostRunResult = {
       stdout: text(raw.stdout),
       stderr: text(raw.stderr),
       code: typeof raw.code === "number" ? raw.code : null,
@@ -344,9 +349,14 @@ export class DesktopHostRunner extends HostRunner {
       ...(raw.sandbox !== undefined && typeof raw.sandbox === "object" && raw.sandbox !== null
         ? { sandbox: { mechanism: "sandbox-exec" as const, ...(typeof raw.sandbox.note === "string" ? { note: raw.sandbox.note } : {}) } }
         : {}),
-    });
+    };
+    this.store?.settled(answer.id, { result });
+    waiting.resolve(result);
     return true;
   }
+
+  status(id: string): ReturnType<HostExecStore["status"]> { return this.store?.status(id) ?? { state: "unknown", started: false }; } // the way back to a request_id after a disconnect
+  cancel(id: string): ReturnType<typeof cancelDecision> { return cancelDecision(this.store, id, this.pending.has(id), frame => this.seat?.write(frame)); }
 
   /**
    * The two routes the Mac's app uses, reached after the UI token check like every route; admin

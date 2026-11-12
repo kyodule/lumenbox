@@ -719,6 +719,10 @@ const HOST_EXEC_APPROVAL_MS = 120_000;
 const HOST_EXEC_SCHEMA = 2;
 const hostExecQueue = [];
 const hostExecSeen = new Set();
+// One entry per command this Mac is handling: queued, deciding, asking, or running. `pid` is the
+// process group the runner announced, and `answered` says a cancel already sent its own answer so
+// the normal result is not posted twice.
+const hostExecActive = new Map();
 let hostExecRequest = null;
 let hostExecGeneration = 0;
 let hostExecBusy = false;
@@ -887,6 +891,7 @@ function watchHostExec() {
           } catch {
             continue;
           }
+          if (job?.type === "cancel" && typeof job.id === "string") { void cancelHostExec(job.id); continue; }
           if (job?.type !== "run" || typeof job.id !== "string" || typeof job.command !== "string" || hostExecSeen.has(job.id)) continue;
           hostExecSeen.add(job.id);
           hostExecQueue.push({ ...job, generation });
@@ -917,20 +922,81 @@ async function pumpHostExec() {
       } catch (err) {
         answer = { refused: `the Mac failed: ${err.message}` };
       }
-      postHostExecResult({ id: job.id, ...answer });
+      const active = hostExecActive.get(job.id);
+      if (active === undefined || active.answered !== true) postHostExecResult({ id: job.id, ...answer });
+      hostExecActive.delete(job.id);
     }
   } finally {
     hostExecBusy = false;
   }
 }
 
+/**
+ * The server asked this Mac to stop a command.
+ *
+ * A command still queued is dropped before anything runs. A running one is killed as a group —
+ * SIGTERM, a second, SIGKILL — because the shell was detached and its children hold the pipes.
+ * "可能已执行" is the honest wording once the group existed: what it already wrote is not undone.
+ */
+async function cancelHostExec(id) {
+  const queued = hostExecQueue.findIndex(job => job.id === id);
+  if (queued >= 0) hostExecQueue.splice(queued, 1);
+  const entry = hostExecActive.get(id);
+  if (entry === undefined) {
+    if (queued < 0) return; // already answered, or never seen here
+    hostExecAudit({ id, decision: "cancelled", cancelled: "not_started" });
+    postHostExecResult({ id, refused: "已取消，未执行" });
+    return;
+  }
+  entry.cancelled = true; // a decision or a dialog in progress stops at its next check
+  const pid = entry.pid;
+  if (pid === undefined) {
+    entry.answered = true;
+    hostExecAudit({ id, decision: "cancelled", cancelled: "not_started" });
+    postHostExecResult({ id, refused: "已取消，未执行" });
+    return;
+  }
+  const signal = name => {
+    try {
+      process.kill(-pid, name);
+    } catch {
+      try {
+        process.kill(pid, name);
+      } catch {}
+    }
+  };
+  signal("SIGTERM");
+  setTimeout(() => signal("SIGKILL"), 1000);
+  const until = Date.now() + 2000;
+  while (Date.now() < until && groupAlive(pid)) await new Promise(done => setTimeout(done, 50));
+  entry.answered = true;
+  hostExecAudit({ id, decision: "cancelled", cancelled: "running" });
+  postHostExecResult({ id, refused: "已取消，可能已执行" });
+}
+
+/** True while any process in the group the runner announced still exists. */
+function groupAlive(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {}
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {}
+  return false;
+}
+
 async function handleHostExecJob(job) {
+  const active = { cancelled: false, answered: false };
+  hostExecActive.set(job.id, active);
   const config = readHostExec();
   const audit = fields => hostExecAudit({ id: job.id, agent: job.agent ?? null, command: job.command.slice(0, 2000), mode: config.mode, ...fields });
   if (config.mode === "off") {
     audit({ decision: "off" });
     return { refused: "Mac execution is off on this Mac" };
   }
+  if (active.cancelled) return { refused: "已取消，未执行" };
   // The decision is TypeScript shared with the server's tests; this process only carries it.
   // Anything but a decision this version understands is a refusal: fail closed.
   let decision;
@@ -971,8 +1037,12 @@ async function handleHostExecJob(job) {
       return { refused: "the connection to the server changed while the Mac was asking" };
     }
   }
+  if (active.cancelled) return { refused: "已取消，未执行" };
   log(`host exec: running for ${job.agent ?? "an agent"} (${decisionName}): ${job.command.slice(0, 200)}`);
-  const answer = await runHostExecChild({ phase: "run", command: job.command, timeoutMs: job.timeoutMs }, (job.timeoutMs || 300_000) + 30_000);
+  const answer = await runHostExecChild({ phase: "run", command: job.command, timeoutMs: job.timeoutMs }, (job.timeoutMs || 300_000) + 30_000, pid => {
+    active.pid = pid;
+    postHostExecResult({ id: job.id, started: true });
+  });
   audit({ decision: decisionName, prefix: remembered, remember: remembered !== null, ...(rememberError !== null ? { rememberError } : {}), answeredMs, code: answer.result?.code ?? null, refused: answer.refused ?? null });
   return answer;
 }
@@ -1018,7 +1088,7 @@ async function askHostExec(job, decision) {
 }
 
 /** One child, one phase: the decision or the run. Its answer is JSON on stdout. */
-function runHostExecChild(job, budgetMs) {
+function runHostExecChild(job, budgetMs, onStarted) {
   return new Promise(resolve => {
     const env = withToolPath({ ...process.env, ELECTRON_RUN_AS_NODE: "1" });
     delete env.AGENTBOX_UI_TOKEN;
@@ -1029,8 +1099,30 @@ function runHostExecChild(job, budgetMs) {
     });
     let out = "";
     let err = "";
+    let buffer = "";
+    let answer = null;
     child.stdout.on("data", chunk => {
-      out += String(chunk);
+      const text = String(chunk);
+      out += text;
+      buffer += text;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+        if (line === "") continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (parsed?.started === true && typeof parsed.pid === "number") {
+          onStarted?.(parsed.pid);
+          continue;
+        }
+        answer = parsed;
+      }
     });
     child.stderr.on("data", chunk => {
       err += String(chunk);
@@ -1043,7 +1135,7 @@ function runHostExecChild(job, budgetMs) {
     child.on("close", () => {
       clearTimeout(killer);
       try {
-        resolve(JSON.parse(out));
+        resolve(answer ?? JSON.parse(buffer.trim()));
       } catch {
         resolve({ refused: `the Mac runner gave no answer${err.trim() ? `: ${err.trim().slice(0, 500)}` : ""}` });
       }

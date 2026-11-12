@@ -9,8 +9,18 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { test } from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DesktopHostRunner, type HostRunner } from "./host-runner.ts";
+import { HostExecStore } from "./host-exec-store.ts";
 import { dispatchTool, type ToolContext } from "./tools.ts";
+
+/** A runner with a ledger in a temp dir and a grace short enough for a test to wait on. */
+function withStore(graceMs = 20) {
+  const dir = mkdtempSync(join(tmpdir(), "agentbox-hostexec-"));
+  return { runner: new DesktopHostRunner({ store: new HostExecStore(join(dir, "pending.jsonl"), { graceMs }) }), dir };
+}
 
 function seat() {
   const frames: { type: string; id: string; agent: string | null; command: string; timeoutMs: number }[] = [];
@@ -57,7 +67,7 @@ test("a refusal on the Mac rejects with its reason", async () => {
 });
 
 test("a disconnect while a command is out reports the result as unknown, never replays", async () => {
-  const runner = new DesktopHostRunner();
+  const { runner } = withStore();
   const s = seat();
   const id = runner.attach(s.write);
   const pending = runner.run("sleep 60");
@@ -67,7 +77,7 @@ test("a disconnect while a command is out reports the result as unknown, never r
 });
 
 test("a newer connection replaces the older one, and the old close changes nothing", async () => {
-  const runner = new DesktopHostRunner();
+  const { runner } = withStore();
   const first = seat();
   const firstId = runner.attach(first.write);
   const pending = runner.run("pwd");
