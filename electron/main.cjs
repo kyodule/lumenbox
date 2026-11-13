@@ -939,8 +939,11 @@ async function pumpHostExec() {
  * "可能已执行" is the honest wording once the group existed: what it already wrote is not undone.
  *
  * 取消只置 entry.cancelled 标记，不会关掉已经弹出的审批框：Electron 的 showMessageBox 没有程序化
- * 关闭的 API，那个框要等人回答、或等它自己的 120 秒超时。框被回答后，跑子进程之前的检查会看到
- * 标记并直接中止，所以取消之后即使点「Run once」也不会执行——只是 UI 上那块框会多挂一会儿。
+ * 关闭的 API，那个框要等人回答、或等它自己的 120 秒超时（已实测：框在 cancel 之后又挂了 55 秒，
+ * 直到 answeredMs 120314 的超时才消失）。
+ *
+ * 「取消之后点 Run once 也不会执行」是**代码路径结论，不是实测**：这条路径上没有真机点过一次。
+ * 依据是 handleHostExecJob 在 spawn 子进程之前会看到 active.cancelled 并直接返回 refused。
  */
 async function cancelHostExec(id) {
   const queued = hostExecQueue.findIndex(job => job.id === id);
