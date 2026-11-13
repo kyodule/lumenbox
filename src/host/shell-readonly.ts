@@ -520,6 +520,23 @@ const dockerReads = (args: readonly string[]): string | undefined => {
   return sub !== undefined && /^(ps|images|logs|inspect|version|info|stats|top|port|diff|history)$/.test(sub) ? undefined : `docker ${sub ?? ""}`.trim();
 };
 
+/**
+ * How long `sleep` may sleep and still count as a read.
+ *
+ * A short pause between two reads is harmless. A long one is not a read at all: `sleep 300` holds
+ * the Mac for five minutes doing nothing, and asking the person to approve that is the point.
+ */
+const SLEEP_READ_SECONDS = 5;
+
+/** Seconds a `sleep` argument asks for, or undefined for a form this does not model. */
+function sleepSeconds(word: string): number | undefined {
+  const match = /^(\d+(?:\.\d+)?)([smhd]?)$/.exec(word);
+  if (match === null) return undefined;
+  const per = match[2] === "m" ? 60 : match[2] === "h" ? 3_600 : match[2] === "d" ? 86_400 : 1;
+  const value = Number(match[1]) * per;
+  return Number.isFinite(value) ? value : undefined;
+}
+
 const npmReads = (args: readonly string[]): string | undefined => {
   const plain = positional(args);
   if (has(args, /^--fix$/)) return "npm --fix";
@@ -576,6 +593,14 @@ const GUARDS: Record<string, Guard> = {
   more: args => (shortOption(args, "o") || shortOption(args, "O") || longOption(args, "--log-file", true) ? "more writing a log file" : undefined),
   date: args => (shortOption(args, "s") || longOption(args, "--set") ? "date setting the clock" : undefined),
   hostname: args => (positional(args).length > 0 ? "hostname setting the name" : undefined),
+  // A sleep is a read only while it is short. Anything this cannot read for certain — a flag, a
+  // form `sleep` would refuse — is treated as long, which errs towards asking.
+  sleep: args => {
+    const seconds = args.map(sleepSeconds);
+    if (seconds.length === 0 || seconds.some(value => value === undefined)) return "a sleep duration this does not model";
+    const total = (seconds as number[]).reduce((sum, value) => sum + value, 0);
+    return total > SLEEP_READ_SECONDS ? `sleep for ${total} seconds` : undefined;
+  },
   // `--paginate` runs whatever PAGER names.
   diff: args => (longOption(args, "--paginate") ? "diff running a pager" : undefined),
   // `command -v node` asks where it is. `command node` runs it, and so does `command rm x`.

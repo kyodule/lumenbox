@@ -937,6 +937,10 @@ async function pumpHostExec() {
  * A command still queued is dropped before anything runs. A running one is killed as a group —
  * SIGTERM, a second, SIGKILL — because the shell was detached and its children hold the pipes.
  * "可能已执行" is the honest wording once the group existed: what it already wrote is not undone.
+ *
+ * 取消只置 entry.cancelled 标记，不会关掉已经弹出的审批框：Electron 的 showMessageBox 没有程序化
+ * 关闭的 API，那个框要等人回答、或等它自己的 120 秒超时。框被回答后，跑子进程之前的检查会看到
+ * 标记并直接中止，所以取消之后即使点「Run once」也不会执行——只是 UI 上那块框会多挂一会儿。
  */
 async function cancelHostExec(id) {
   const queued = hostExecQueue.findIndex(job => job.id === id);

@@ -242,7 +242,7 @@ test("an expansion inside a checked program's arguments is not a read (G3): `fin
 });
 
 test("every program with its own check is in the guarded set (G3), so the expansion rule cannot miss one", () => {
-  const expected = ["find", "sed", "awk", "gawk", "git", "docker", "podman", "npm", "pnpm", "yarn", "node", "python", "python3", "kubectl", "systemctl", "command", "sort", "xxd", "rg", "ag", "tree", "uniq", "file", "less", "more", "date", "hostname", "diff", "mount"];
+  const expected = ["find", "sed", "awk", "gawk", "git", "docker", "podman", "npm", "pnpm", "yarn", "node", "python", "python3", "kubectl", "systemctl", "command", "sort", "xxd", "rg", "ag", "tree", "uniq", "file", "less", "more", "date", "hostname", "diff", "mount", "sleep"];
   for (const name of expected) assert.equal(GUARDED_NAMES.has(name), true, name);
   assert.equal(GUARDED_NAMES.size, new Set(expected).size, "no guarded program is missing from the list");
 });
@@ -373,4 +373,33 @@ test("git config and git stash are whitelists (H4)", () => {
     assert.equal(verdict.readOnly, false, command);
     if (!verdict.readOnly) assert.match(verdict.because, why, command);
   }
+});
+
+test("a short sleep reads, a long one asks: the duration decides, not the name", () => {
+  for (const command of ["sleep 1", "sleep 5", "sleep 0.5", "sleep 1 0"]) {
+    assert.equal(classifyShell(command).readOnly, true, command);
+  }
+  const asks: [string, RegExp][] = [
+    ["sleep 6", /sleep for 6 seconds/],
+    ["sleep 3600", /sleep for 3600 seconds/],
+    ["sleep 1m", /sleep for 60 seconds/],
+    ["sleep 1 5", /sleep for 6 seconds/],
+    ["sleep 1h", /sleep for 3600 seconds/],
+    ["sleep -s 3", /a sleep duration this does not model/],
+    ["sleep", /a sleep duration this does not model/],
+  ];
+  for (const [command, why] of asks) {
+    const verdict = classifyShell(command);
+    assert.equal(verdict.readOnly, false, command);
+    if (!verdict.readOnly) assert.match(verdict.because, why, command);
+  }
+});
+
+test("the sleep rule does not change how the rest of a chain is judged", () => {
+  // `npm test` is not a reader (`npmReads` allows ls/view/outdated and friends), so the chain asks
+  // for the same reason it did before sleep had a rule: the second command, not the pause.
+  assert.deepEqual(classifyShell("sleep 1 && npm test"), classifyShell("npm test"));
+  assert.equal(classifyShell("sleep 1 && ls").readOnly, true, "a short pause plus a read");
+  assert.equal(classifyShell("sleep 300 && ls").readOnly, false, "a long pause is the reason");
+  assert.equal(classifyShell("ls && sleep 2").readOnly, true);
 });
